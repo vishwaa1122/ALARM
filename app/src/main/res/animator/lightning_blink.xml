@@ -1,0 +1,9 @@
+<objectAnimator xmlns:android="http://schemas.android.com/apk/res/android"
+    android:duration="500"
+    android:propertyName="alpha"
+    android:repeatCount="infinite"
+    android:repeatMode="reverse"
+    android:valueFrom="1.0"
+    android:valueTo="0.0"
+    android:valueType="floatType" />
+<!-- Remove the stray <resources> block; colors must live in res/values/colors.xml -->

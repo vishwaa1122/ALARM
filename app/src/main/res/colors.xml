@@ -1,0 +1,7 @@
+<resources>
+    <color name="neon_purple_500">#A020F0</color>
+    <color name="neon_purple_900">#4B0082</color>
+    <color name="gold_accent">#FFD700</color>
+    <color name="neon_glow">#FF69B4</color>
+    <color name="on_surface">#FFFFFF</color>
+</resources>

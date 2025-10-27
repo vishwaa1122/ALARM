@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:startColor="@color/dark_blue_primary"
+                android:endColor="@color/dark_blue_secondary"
+                android:angle="270"/>
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle" android:alpha="0.33">
+            <solid android:color="#170024"/>
+        </shape>
+    </item>
+    <item android:drawable="@drawable/ic_lightning_anim"/>
+</layer-list>

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Dark theme -->
+    <style name="Theme.Chrona" parent="Theme.Material3.Dark.NoActionBar">
+        <!-- Core palette -->
+        <item name="colorPrimary">@color/md_theme_dark_primary</item>
+        <item name="colorOnPrimary">@color/md_theme_dark_onPrimary</item>
+        <item name="colorSecondary">@color/md_theme_dark_secondary</item>
+        <item name="colorOnSecondary">@color/md_theme_dark_onSecondary</item>
+        <item name="colorSurface">@color/md_theme_dark_surface</item>
+        <item name="colorOnSurface">@color/md_theme_dark_onSurface</item>
+
+        <!-- System bars -->
+        <item name="android:statusBarColor">?attr/colorPrimary</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">false</item>
+        <item name="android:navigationBarColor">?attr/colorSurface</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
+
+        <!-- App bar / toolbar -->
+        <item name="appBarLayoutStyle">@style/Widget.Chrona.AppBarLayout.Dark</item>
+        <item name="toolbarStyle">@style/Widget.Chrona.Toolbar.Dark</item>
+    </style>
+
+    <style name="Widget.Chrona.AppBarLayout.Dark" parent="Widget.Material3.AppBarLayout">
+        <item name="android:background">?attr/colorPrimary</item>
+    </style>
+
+    <style name="Widget.Chrona.Toolbar.Dark" parent="Widget.Material3.Toolbar">
+        <item name="materialThemeOverlay">@style/ThemeOverlay.Chrona.Toolbar.Dark</item>
+        <item name="titleTextColor">?attr/colorOnPrimary</item>
+        <item name="navigationIconTint">?attr/colorOnPrimary</item>
+    </style>
+
+    <style name="ThemeOverlay.Chrona.Toolbar.Dark" parent="">
+        <item name="colorControlNormal">?attr/colorOnPrimary</item>
+    </style>
+
+</resources>
