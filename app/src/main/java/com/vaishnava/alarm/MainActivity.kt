@@ -382,6 +382,46 @@ class MainActivity : ComponentActivity() {
 
         notificationManager.notify(2, notification)
     }
+
+    private fun scheduleAndSaveAlarm(
+        hour: Int,
+        minute: Int,
+        ringtoneUri: Uri?,
+        days: Set<Int>
+    ): Alarm {
+        val alarmId = alarmStorage.getNextAlarmId()
+        val ringtoneUriString =
+            ringtoneUri?.toString() ?: Settings.System.DEFAULT_ALARM_ALERT_URI.toString()
+
+        val alarm = Alarm(
+            id = alarmId,
+            hour = hour,
+            minute = minute,
+            isEnabled = true,
+            ringtoneUri = ringtoneUriString,
+            days = days.toList(),
+            isHidden = false
+        )
+        alarmStorage.addAlarm(alarm)
+        alarmScheduler.schedule(alarm)
+
+        markAlarmSet(true)
+        // Remove the notification update as we don't want to show notifications when alarms are set
+        // updateNextAlarmNotification()
+        return alarm
+    }
+
+    private fun cancelAlarm(alarmId: Int) {
+        val alarm = alarmStorage.getAlarms().firstOrNull { it.id == alarmId }
+        if (alarm != null && !alarm.isProtected) {
+            alarmScheduler.cancel(alarm)
+            alarmStorage.deleteAlarm(alarmId)
+            markAlarmSet(false)
+            Log.d("AlarmApp", "Alarm with ID $alarmId cancelled.")
+            // Remove the notification update as we don't want to show notifications when alarms are set
+            // updateNextAlarmNotification()
+        }
+    }
 }
 
 fun formatDays(days: List<Int>?): String {
