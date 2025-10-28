@@ -4,10 +4,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.os.Vibrator
 import android.provider.Settings
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -40,6 +43,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.vaishnava.alarm.data.Alarm
 import com.vaishnava.alarm.ui.theme.AlarmTheme
 import kotlinx.coroutines.delay
 
@@ -89,8 +93,17 @@ class AlarmActivity : ComponentActivity() {
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
                     WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
                     WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
         )
+
+        // Additional flags to ensure the screen turns on and shows over the lock screen
+        window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+        window.addFlags(WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
+        window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
+        window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // Allow overlay type safely across Android versions
         try {
@@ -136,6 +149,36 @@ class AlarmActivity : ComponentActivity() {
                 }
             }
         }
+        
+        // Immediately turn on the screen when the activity starts
+        turnScreenOn()
+    }
+
+    private fun turnScreenOn() {
+        try {
+            // Acquire a wake lock to turn the screen on
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wakeLock = powerManager.newWakeLock(
+                PowerManager.FULL_WAKE_LOCK or 
+                PowerManager.ACQUIRE_CAUSES_WAKEUP or 
+                PowerManager.ON_AFTER_RELEASE, 
+                "AlarmApp::TurnScreenOn"
+            )
+            wakeLock.acquire(5000) // Acquire for 5 seconds
+            wakeLock.release()
+        } catch (e: Exception) {
+            // If we can't acquire a wake lock, at least try to turn the screen on
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    setShowWhenLocked(true)
+                    setTurnScreenOn(true)
+                } else {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
+                }
+            } catch (e2: Exception) {
+                // If all else fails, we've done our best
+            }
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
@@ -153,6 +196,7 @@ class AlarmActivity : ComponentActivity() {
         var passwordInput by remember { mutableStateOf("") }
         var showPasswordError by remember { mutableStateOf(false) }
         var remainingTime by remember { mutableStateOf(STARTUP_BLOCKED_TIME_SECONDS) }
+        var isDismissed by remember { mutableStateOf(false) }
 
         val focusRequester = remember { FocusRequester() }
         val keyboardController = LocalSoftwareKeyboardController.current
@@ -196,6 +240,14 @@ class AlarmActivity : ComponentActivity() {
             } else keyboardController?.hide()
         }
 
+        // Auto-dismiss after a certain time to prevent force restart requirement
+        LaunchedEffect(Unit) {
+            delay(10 * 60 * 1000) // Auto-dismiss after 10 minutes
+            if (!isDismissed) {
+                dismissAlarm(alarmId)
+            }
+        }
+
         Column(
             modifier = modifier.fillMaxSize().padding(16.dp),
             verticalArrangement = Arrangement.Center
@@ -234,35 +286,41 @@ class AlarmActivity : ComponentActivity() {
             Spacer(Modifier.height(16.dp))
             Button(onClick = {
                 if (passwordInput == CORRECT_PASSWORD) {
-                    try {
-                        timerState = TimerState.Idle
-                        val serviceIntent = Intent(this@AlarmActivity, AlarmForegroundService::class.java).apply {
-                            action = Constants.ACTION_STOP_FOREGROUND_SERVICE
-                            putExtra(AlarmReceiver.ALARM_ID, alarmId)
-                        }
-                        startService(serviceIntent)
-
-                        val alarmStorage = AlarmStorage(applicationContext)
-                        val alarms = alarmStorage.getAlarms()
-                        val alarm = alarms.find { it.id == alarmId }
-
-                        if (alarm != null && alarm.days.isNullOrEmpty()) {
-                            val updatedAlarm = alarm.copy(isEnabled = false)
-                            alarmStorage.updateAlarm(updatedAlarm)
-                            val alarmScheduler = AndroidAlarmScheduler(applicationContext)
-                            alarmScheduler.cancel(updatedAlarm)
-                            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
-                        }
-
-                        Handler(Looper.getMainLooper()).postDelayed({ finish() }, 100)
-                    } catch (e: Exception) {
-                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
-                        showPasswordError = true
-                    }
+                    isDismissed = true
+                    dismissAlarm(alarmId)
                 } else showPasswordError = true
             }, enabled = timerState == TimerState.InitialEntry) {
                 Text("Dismiss")
             }
+            
+            // Remove the snooze and force dismiss buttons as they're not useful
+        }
+    }
+
+    private fun dismissAlarm(alarmId: Int) {
+        try {
+            timerState = TimerState.Idle
+            val serviceIntent = Intent(this@AlarmActivity, AlarmForegroundService::class.java).apply {
+                action = Constants.ACTION_STOP_FOREGROUND_SERVICE
+                putExtra(AlarmReceiver.ALARM_ID, alarmId)
+            }
+            startService(serviceIntent)
+
+            val alarmStorage = AlarmStorage(applicationContext)
+            val alarms = alarmStorage.getAlarms()
+            val alarm = alarms.find { it.id == alarmId }
+
+            if (alarm != null && alarm.days.isNullOrEmpty()) {
+                val updatedAlarm = alarm.copy(isEnabled = false)
+                alarmStorage.updateAlarm(updatedAlarm)
+                val alarmScheduler = AndroidAlarmScheduler(applicationContext)
+                alarmScheduler.cancel(updatedAlarm)
+                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            }
+
+            Handler(Looper.getMainLooper()).postDelayed({ finish() }, 100)
+        } catch (e: Exception) {
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
         }
     }
 
@@ -272,15 +330,12 @@ class AlarmActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        relaunchSelf()
+        // Don't relaunch self to prevent stuck states
     }
 
     override fun onPause() {
         super.onPause()
-        if (!isFinishing) {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
-            relaunchSelf()
-        }
+        // Don't relaunch self to prevent stuck states
     }
 
     override fun onDestroy() {
@@ -288,20 +343,6 @@ class AlarmActivity : ComponentActivity() {
         // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
         try {
             unregisterReceiver(screenReceiver)
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
-        } catch (e: Exception) {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
-        }
-    }
-
-    private fun relaunchSelf() {
-        try {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
-            val intent = Intent(this, AlarmActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                putExtra(AlarmReceiver.ALARM_ID, alarmId)
-            }
-            startActivity(intent)
             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
         } catch (e: Exception) {
             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call

@@ -1,6 +1,7 @@
 package com.vaishnava.alarm
 
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioManager
@@ -33,6 +34,7 @@ class AlarmForegroundService : Service() {
     private var isOneTimeAlarm: Boolean = false
     private var previousAlarmVolume: Int = 0
     private val launcherScheduled = AtomicBoolean(false)
+    private var ringtoneUri: Uri? = null
 
     // Handler and Runnable for periodic reposting
     private lateinit var bgHandler: Handler
@@ -56,13 +58,37 @@ class AlarmForegroundService : Service() {
 
         try {
             val intent = Intent(this@AlarmForegroundService, AlarmActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
                 putExtra(AlarmReceiver.ALARM_ID, currentAlarmId)
-                putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, mediaPlayer?.currentUri?.toString())
+                putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri?.toString())
                 putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, currentRepeatDays)
             }
             startActivity(intent)
         } catch (e: Exception) {
+            // If the normal startActivity fails, try a more aggressive approach
+            try {
+                val fallbackIntent = Intent(this@AlarmForegroundService, AlarmActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or 
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or 
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+                    putExtra(AlarmReceiver.ALARM_ID, currentAlarmId)
+                    putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri?.toString())
+                    putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, currentRepeatDays)
+                }
+                startActivity(fallbackIntent)
+            } catch (fallbackException: Exception) {
+                // Last resort: try to broadcast an intent that might wake up the device
+                try {
+                    val wakeIntent = Intent("com.vaishnava.alarm.WAKE_UP").apply {
+                        addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+                        putExtra(AlarmReceiver.ALARM_ID, currentAlarmId)
+                    }
+                    sendBroadcast(wakeIntent)
+                } catch (broadcastException: Exception) {
+                    // If all else fails, log the error but don't crash
+                }
+            }
         }
     }
 
@@ -121,7 +147,7 @@ class AlarmForegroundService : Service() {
         // Extract alarm data from intent
         currentAlarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
         val ringtoneUriString = intent?.getStringExtra(AlarmReceiver.EXTRA_RINGTONE_URI)
-        val ringtoneUri = if (ringtoneUriString != null) {
+        ringtoneUri = if (ringtoneUriString != null) {
             // Handle special test cases
             if (ringtoneUriString == "test_ringtone") {
                 RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
@@ -170,6 +196,9 @@ class AlarmForegroundService : Service() {
         // Start periodic notification reposting
         bgHandler.post(notificationReposter)
         // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+
+        // Turn on the screen immediately when the alarm starts
+        turnScreenOn()
 
         if (launcherScheduled.compareAndSet(false, true)) {
             bgHandler.post(activityLauncher)
@@ -319,23 +348,23 @@ class AlarmForegroundService : Service() {
                             val recreatedPlayer = restartMediaPlayer(mp, finalRingtoneUri, 0, attrs)
                             if (recreatedPlayer != null) {
                                 mediaPlayer = recreatedPlayer
-                                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call")
+                                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call")
                             }
                         }
                     }
-                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                     mp.prepare()
                     mp.start()
                     mediaPlayer = mp
-                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call: $finalRingtoneUri")
+                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call: $finalRingtoneUri")
                 }
             } catch (e: Exception) {
-                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
-                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call}", e)
+                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call}", e)
                 
                 // Try fallback with Ringtone
                 try {
-                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                     val ringtone = RingtoneManager.getRingtone(this, finalRingtoneUri)
                     ringtone.audioAttributes = AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ALARM)
@@ -343,9 +372,9 @@ class AlarmForegroundService : Service() {
                         .build()
                     ringtone.isLooping = true
                     ringtone.play()
-                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                 } catch (e2: Exception) {
-                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                 }
             }
         }
@@ -354,7 +383,7 @@ class AlarmForegroundService : Service() {
         try {
             val vibrationPattern = longArrayOf(0, 500, 500, 500) // Start immediately, vibrate 500ms, pause 500ms, vibrate 500ms
             if (vibrator?.hasVibrator() == true) {
-                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                     val vibrationEffect = VibrationEffect.createWaveform(vibrationPattern, intArrayOf(0, 2, 1, 2), 0) // Repeat from index 0
                     vibrator?.vibrate(vibrationEffect)
@@ -362,84 +391,111 @@ class AlarmForegroundService : Service() {
                     @Suppress("DEPRECATION")
                     vibrator?.vibrate(vibrationPattern, 0) // Repeat from index 0
                 }
-                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
             } else {
-                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
             }
         } catch (e: Exception) {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         }
 
         // Special handling for one-time alarms
         if (isOneTimeAlarm) {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         } else {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         }
 
         return START_STICKY // Restart service if killed
     }
 
+    private fun turnScreenOn() {
+        try {
+            // Acquire a wake lock to turn the screen on
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wakeLock = powerManager.newWakeLock(
+                PowerManager.FULL_WAKE_LOCK or 
+                PowerManager.ACQUIRE_CAUSES_WAKEUP or 
+                PowerManager.ON_AFTER_RELEASE, 
+                "AlarmApp::TurnScreenOn"
+            )
+            wakeLock.acquire(5000) // Acquire for 5 seconds
+            wakeLock.release()
+        } catch (e: Exception) {
+            // If we can't acquire a wake lock, at least try to turn the screen on
+            try {
+                // Send a broadcast to wake up the device
+                val wakeIntent = Intent("com.vaishnava.alarm.WAKE_UP").apply {
+                    addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
+                    putExtra(AlarmReceiver.ALARM_ID, currentAlarmId)
+                }
+                sendBroadcast(wakeIntent)
+            } catch (e2: Exception) {
+                // If all else fails, we've done our best
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         
         // Clean up MediaPlayer
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()
             mediaPlayer = null
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         } catch (e: Exception) {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         }
 
         // Stop vibration
         try {
             vibrator?.cancel()
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         } catch (e: Exception) {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         }
 
         // Restore previous alarm volume
         try {
             val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
             audioManager.setStreamVolume(AudioManager.STREAM_ALARM, previousAlarmVolume, 0)
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         } catch (e: Exception) {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         }
 
         // Remove notification reposting callback
         bgHandler.removeCallbacks(notificationReposter)
-        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
 
         // Remove activity launcher callback
         bgHandler.removeCallbacks(activityLauncher)
-        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
 
         // Remove volume enforcer callback
         bgHandler.removeCallbacks(volumeEnforcer)
-        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
 
         // Release wake lock
         if (wakeLock.isHeld) {
             try {
                 wakeLock.release()
-                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
             } catch (e: Exception) {
-                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
             }
         }
 
         // Quit background thread
         try {
             bgThread.quit()
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         } catch (e: Exception) {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         }
 
         super.onDestroy()
@@ -467,7 +523,7 @@ class AlarmForegroundService : Service() {
         val intent = Intent(this, AlarmActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
             putExtra(AlarmReceiver.ALARM_ID, currentAlarmId)
-            putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, mediaPlayer?.currentUri?.toString())
+            putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri?.toString())
             putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, currentRepeatDays)
         }
         
@@ -607,7 +663,7 @@ class AlarmForegroundService : Service() {
         attrs: AudioAttributes
     ): MediaPlayer? {
         return try {
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
             
             // Release the original player
             try {
@@ -632,7 +688,7 @@ class AlarmForegroundService : Service() {
             newPlayer.isLooping = false
             newPlayer.start()
             
-            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
             newPlayer
         } catch (e: Exception) {
             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call

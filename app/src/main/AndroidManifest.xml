@@ -90,15 +90,13 @@
         <!-- AlarmReceiver: fired when your alarm triggers -->
         <receiver
             android:name=".AlarmReceiver"
-            android:enabled="true"
-            android:exported="false"
-            android:directBootAware="true">
-            <!-- Add intent filter for dynamic alarm actions -->
-            <intent-filter android:priority="1000">
+            android:exported="true"
+            android:directBootAware="true"
+            android:enabled="true">
+            <intent-filter android:priority="999">
                 <action android:name="com.vaishnava.alarm.DIRECT_BOOT_ALARM" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="com.vaishnava.alarm.WAKE_UP" />
             </intent-filter>
         </receiver>
 

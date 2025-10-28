@@ -3,7 +3,13 @@ package com.vaishnava.alarm
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.RingtoneManager
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
 import java.util.Calendar
 
 class AlarmReceiver : BroadcastReceiver() {
@@ -13,6 +19,7 @@ class AlarmReceiver : BroadcastReceiver() {
         const val EXTRA_RINGTONE_URI = "extra_ringtone_uri"
         const val EXTRA_REPEAT_DAYS = "extra_repeat_days"
         private const val ALARM_ACTION = "com.vaishnava.alarm.DIRECT_BOOT_ALARM"
+        private const val WAKE_UP_ACTION = "com.vaishnava.alarm.WAKE_UP"
     }
 
     override fun onReceive(context: Context?, intent: Intent?) {
@@ -26,10 +33,61 @@ class AlarmReceiver : BroadcastReceiver() {
         // Process alarm intents - strict action checking
         // Only accept the specific alarm action or boot completed action
         val isValidAlarmAction = intent.action == ALARM_ACTION || 
-                                intent.action == "android.intent.action.BOOT_COMPLETED"
+                                intent.action == "android.intent.action.BOOT_COMPLETED" ||
+                                intent.action == WAKE_UP_ACTION
         
         if (!isValidAlarmAction) {
             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.d call
+            return
+        }
+        
+        // Handle wake-up action specifically
+        if (intent.action == WAKE_UP_ACTION) {
+            // Launch the alarm activity directly
+            val alarmId = intent.getIntExtra(ALARM_ID, -1)
+            if (alarmId != -1) {
+                val activityIntent = Intent(context, AlarmActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or 
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or 
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    putExtra(ALARM_ID, alarmId)
+                }
+                try {
+                    context.startActivity(activityIntent)
+                } catch (e: Exception) {
+                    // If we can't start the activity, at least make a noise
+                    try {
+                        val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                        val ringtone = RingtoneManager.getRingtone(context, ringtoneUri)
+                        ringtone.isLooping = true
+                        ringtone.play()
+                        
+                        // Stop the ringtone after 30 seconds to prevent battery drain
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            try {
+                                if (ringtone.isPlaying) {
+                                    ringtone.stop()
+                                }
+                            } catch (e: Exception) {
+                                // Ignore errors when stopping
+                            }
+                        }, 30000)
+                    } catch (e2: Exception) {
+                        // If we can't play a ringtone, at least vibrate
+                        try {
+                            val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 500), 0))
+                            } else {
+                                @Suppress("DEPRECATION")
+                                vibrator.vibrate(longArrayOf(0, 500, 500), 0)
+                            }
+                        } catch (e3: Exception) {
+                            // If we can't vibrate, we've done our best
+                        }
+                    }
+                }
+            }
             return
         }
         
