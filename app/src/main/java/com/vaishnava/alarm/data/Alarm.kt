@@ -10,5 +10,6 @@ data class Alarm(
     val ringtoneUri: String?,
     val days: List<Int>? = emptyList(),
     val alarmTime: Long = 0L,        // Added to support rescheduling
-    val isHidden: Boolean = false
+    val isHidden: Boolean = false,
+    val isProtected: Boolean = false
 )

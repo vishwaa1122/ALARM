@@ -318,6 +318,12 @@ class AlarmActivity : ComponentActivity() {
                 // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
             }
 
+            // Clear the upcoming alarm notification
+            val clearNotificationIntent = Intent("com.vaishnava.alarm.CLEAR_NOTIFICATION").apply {
+                setPackage(packageName)
+            }
+            sendBroadcast(clearNotificationIntent)
+
             Handler(Looper.getMainLooper()).postDelayed({ finish() }, 100)
         } catch (e: Exception) {
             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call

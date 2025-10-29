@@ -107,15 +107,23 @@ class AndroidAlarmScheduler(private val context: Context) : AlarmScheduler {
                     Log.d("AlarmScheduler", "Found valid alarm time for today: ${calendar.time}")
                 } else {
                     Log.d("AlarmScheduler", "Alarm time for today has already passed")
+                    // If the alarm time has passed today, schedule for tomorrow
+                    calendar.add(Calendar.DAY_OF_YEAR, 1)
+                    calendar.set(Calendar.HOUR_OF_DAY, alarm.hour)
+                    calendar.set(Calendar.MINUTE, alarm.minute)
+                    calendar.set(Calendar.SECOND, 0)
+                    calendar.set(Calendar.MILLISECOND, 0)
+                    val tomorrowTime = calendar.timeInMillis
+                    
+                    if (tomorrowTime < nextAlarmTime) {
+                        nextAlarmTime = tomorrowTime
+                    }
+                    Log.d("AlarmScheduler", "Scheduled for tomorrow: ${calendar.time}")
                 }
             } else {
                 Log.d("AlarmScheduler", "Today ($currentDayOfWeek) is not a valid alarm day")
-            }
-            
-            // If we didn't find a time for today, look for the next valid day
-            if (nextAlarmTime == Long.MAX_VALUE) {
-                Log.d("AlarmScheduler", "Looking for next valid day")
-                // Look for the next valid day in the current week
+                // Look for the next valid day
+                var foundNextDay = false
                 for (i in 1..7) {
                     val checkDay = (currentDayOfWeek + i - 1) % 7 + 1
                     if (alarm.days.contains(checkDay)) {
@@ -131,25 +139,37 @@ class AndroidAlarmScheduler(private val context: Context) : AlarmScheduler {
                             nextAlarmTime = dayTime
                         }
                         Log.d("AlarmScheduler", "Found valid alarm time for day $checkDay: ${calendar.time}")
+                        foundNextDay = true
                         break
                     }
                 }
-            }
-            
-            // If we still haven't found a time, use the first valid day of next week
-            if (nextAlarmTime == Long.MAX_VALUE) {
-                Log.d("AlarmScheduler", "No valid day found this week, using first valid day of next week")
-                val firstValidDay = alarm.days.minOrNull() ?: currentDayOfWeek
-                calendar.timeInMillis = now
-                calendar.add(Calendar.WEEK_OF_YEAR, 1)
-                calendar.set(Calendar.DAY_OF_WEEK, firstValidDay)
-                calendar.set(Calendar.HOUR_OF_DAY, alarm.hour)
-                calendar.set(Calendar.MINUTE, alarm.minute)
-                calendar.set(Calendar.SECOND, 0)
-                calendar.set(Calendar.MILLISECOND, 0)
                 
-                nextAlarmTime = calendar.timeInMillis
-                Log.d("AlarmScheduler", "Using first valid day of next week: ${calendar.time}")
+                // If we still haven't found a time, use the first valid day
+                if (!foundNextDay) {
+                    Log.d("AlarmScheduler", "No valid day found this week, using first valid day")
+                    val firstValidDay = alarm.days.minOrNull() ?: currentDayOfWeek
+                    calendar.timeInMillis = now
+                    // Find the next occurrence of this day
+                    var daysToAdd = 0
+                    for (i in 1..7) {
+                        val checkDay = (currentDayOfWeek + i - 1) % 7 + 1
+                        if (checkDay == firstValidDay) {
+                            daysToAdd = i
+                            break
+                        }
+                    }
+                    if (daysToAdd == 0) {
+                        daysToAdd = 7 // Next week
+                    }
+                    calendar.add(Calendar.DAY_OF_YEAR, daysToAdd)
+                    calendar.set(Calendar.HOUR_OF_DAY, alarm.hour)
+                    calendar.set(Calendar.MINUTE, alarm.minute)
+                    calendar.set(Calendar.SECOND, 0)
+                    calendar.set(Calendar.MILLISECOND, 0)
+                    
+                    nextAlarmTime = calendar.timeInMillis
+                    Log.d("AlarmScheduler", "Using first valid day: ${calendar.time}")
+                }
             }
             
             triggerAtMillis = nextAlarmTime

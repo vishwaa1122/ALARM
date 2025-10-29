@@ -126,14 +126,15 @@ class AlarmReceiver : BroadcastReceiver() {
                     if (alarm != null) {
                         // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.d calls
                         
-                        // Cancel the alarm after it fires to prevent repeated firing
-                        // Only for non-repeating alarms
+                        // Always reschedule repeating alarms (including daily 5 AM alarms)
+                        // Cancel one-time alarms after firing
                         if (alarm.days.isNullOrEmpty()) {
+                            // For one-time alarms, cancel after firing
                             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.d call
                             val scheduler = AndroidAlarmScheduler(context)
                             scheduler.cancel(alarm)
                         } else {
-                            // For repeating alarms, reschedule for the next occurrence
+                            // For repeating alarms (including 5 AM daily alarms), always reschedule
                             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.d call
                             val scheduler = AndroidAlarmScheduler(context)
                             scheduler.schedule(alarm)
@@ -158,7 +159,11 @@ class AlarmReceiver : BroadcastReceiver() {
                 
                 try {
                     // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.service and UnifiedLogger.success calls
-                    context.startForegroundService(serviceIntent)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                        context.startForegroundService(serviceIntent)
+                    } else {
+                        context.startService(serviceIntent)
+                    }
                     // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.success call
                 } catch (e: Exception) {
                     // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.e calls
@@ -187,6 +192,7 @@ class AlarmReceiver : BroadcastReceiver() {
                         }
                     }
                 }
+
             } else {
                 // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.e call
             }

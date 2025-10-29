@@ -203,66 +203,89 @@
             android:name=".DirectBootTestActivity"
             android:exported="true"
             android:label="Direct Boot Test" />
+            android:label="Direct Boot Test"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Test activity for Protected Alarm features -->
         <activity
             android:name=".TestProtectedAlarmActivity"
             android:exported="true"
-            android:label="Test Protected Alarm" />
+            android:label="Test Protected Alarm"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Logger test activity -->
         <activity
             android:name=".LoggerTestActivity"
             android:exported="true"
-            android:label="Logger Test" />
+            android:label="Logger Test"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Test Simple Logger activity -->
         <activity
             android:name=".TestSimpleLoggerActivity"
             android:exported="true"
-            android:label="Test Simple Logger" />
+            android:label="Test Simple Logger"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Logger Verification activity -->
         <activity
             android:name=".LoggerVerificationActivity"
             android:exported="true"
-            android:label="Logger Verification" />
+            android:label="Logger Verification"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Forensic Logger Test activity -->
         <activity
             android:name=".ForensicLoggerTestActivity"
             android:exported="true"
-            android:label="Forensic Logger Test" />
+            android:label="Forensic Logger Test"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Test 5 AM Alarm activity -->
         <activity
             android:name=".TestFiveAMAlarmActivity"
             android:exported="true"
-            android:label="Test 5 AM Alarm" />
+            android:label="Test 5 AM Alarm"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Test Alarm activity -->
         <activity
             android:name=".TestAlarmActivity"
             android:exported="true"
-            android:label="Test Alarm" />
+            android:label="Test Alarm"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Diagnostics activity -->
         <activity
             android:name=".DiagnosticsActivity"
             android:exported="true"
-            android:label="Diagnostics" />
+            android:label="Diagnostics"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Debug Logger activity -->
         <activity
             android:name=".DebugLoggerActivity"
             android:exported="true"
-            android:label="Debug Logger" />
+            android:label="Debug Logger"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Minimal Test activity -->
         <activity
             android:name=".MinimalTestActivity"
             android:exported="true"
-            android:label="Minimal Test" />
+            android:label="Minimal Test"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
 
         <!-- Main launcher activity -->
         <activity
@@ -271,6 +294,8 @@
             android:label="@string/app_name"
             android:showOnLockScreen="true"
             android:turnScreenOn="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm"
             android:theme="@style/Theme.Alarm">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

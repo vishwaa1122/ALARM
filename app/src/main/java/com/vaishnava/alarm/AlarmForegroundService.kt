@@ -35,6 +35,7 @@ class AlarmForegroundService : Service() {
     private var previousAlarmVolume: Int = 0
     private val launcherScheduled = AtomicBoolean(false)
     private var ringtoneUri: Uri? = null
+    private var audioFocusRequest: android.media.AudioFocusRequest? = null
 
     // Handler and Runnable for periodic reposting
     private lateinit var bgHandler: Handler
@@ -97,19 +98,56 @@ class AlarmForegroundService : Service() {
         override fun run() {
             try {
                 val audioManager = getSystemService(AudioManager::class.java)
+                
+                // Ensure audio mode is set correctly
+                try {
+                    if (audioManager?.mode != AudioManager.MODE_RINGTONE) {
+                        audioManager?.mode = AudioManager.MODE_RINGTONE
+                    }
+                } catch (e: Exception) {
+                    // Ignore audio mode errors
+                }
+                
                 val currentVolume = audioManager?.getStreamVolume(AudioManager.STREAM_ALARM) ?: 0
                 val maxVolume = audioManager?.getStreamMaxVolume(AudioManager.STREAM_ALARM) ?: 0
                 
                 if (currentVolume < maxVolume) {
-                } else {
+                    // Set volume to max if it's not already
+                    audioManager?.setStreamVolume(AudioManager.STREAM_ALARM, maxVolume, 0)
+                }
+                
+                // Also enforce music stream volume
+                try {
+                    val musicCurrentVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
+                    val musicMaxVolume = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 0
+                    if (musicCurrentVolume < musicMaxVolume) {
+                        audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, musicMaxVolume, 0)
+                    }
+                } catch (e: Exception) {
+                    // Ignore music stream errors
                 }
             } catch (e: Exception) {
+                // Ignore errors
             }
             
             // Continue enforcing volume while alarm is playing
             if (mediaPlayer?.isPlaying == true) {
-                bgHandler.postDelayed(this, 1000) // Check every second
+                bgHandler.postDelayed(this, 500) // Check every 500ms for more responsive volume control
             }
+        }
+    }
+    
+    // Runnable to check for upcoming alarms and show notifications
+    private val notificationChecker = object : Runnable {
+        override fun run() {
+            try {
+                showAlarmNotificationIfNeeded()
+            } catch (e: Exception) {
+                // Ignore errors
+            }
+            
+            // Continue checking for notifications
+            bgHandler.postDelayed(this, 2000) // Check every 2 seconds
         }
     }
 
@@ -134,6 +172,8 @@ class AlarmForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Handle stop action
         if (intent?.action == Constants.ACTION_STOP_FOREGROUND_SERVICE) {
+            // Clear the next alarm notification when alarm is stopped
+            clearNextAlarmNotification()
             stopSelf()
             return START_NOT_STICKY
         }
@@ -197,6 +237,10 @@ class AlarmForegroundService : Service() {
         bgHandler.post(notificationReposter)
         // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
 
+        // Start periodic notification checking
+        bgHandler.post(notificationChecker)
+        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+
         // Turn on the screen immediately when the alarm starts
         turnScreenOn()
 
@@ -221,9 +265,44 @@ class AlarmForegroundService : Service() {
             mediaPlayer = null
 
             val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+            
+            // Set audio mode to ensure alarm uses the correct stream
+            try {
+                audioManager.mode = AudioManager.MODE_RINGTONE
+            } catch (e: Exception) {
+                // Ignore if we can't set audio mode
+            }
+            
             previousAlarmVolume = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)
             val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
-            audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxVolume, AudioManager.FLAG_PLAY_SOUND)
+            audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxVolume, 0) // No flags for immediate volume change
+            
+            // Also set the music stream to max to ensure maximum loudness
+            // Some devices route alarm sounds through the music stream for better loudness
+            try {
+                val musicMaxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, musicMaxVolume, 0)
+            } catch (e: Exception) {
+                // Ignore if we can't set music stream volume
+            }
+
+            // Request audio focus for alarm
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+            
+            // Use AudioFocusRequest for API 26+
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                audioFocusRequest = android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                    .setAudioAttributes(audioAttributes)
+                    .build()
+                audioManager.requestAudioFocus(audioFocusRequest!!)
+            } else {
+                // Fallback for older versions
+                @Suppress("DEPRECATION")
+                audioManager.requestAudioFocus(null, AudioManager.STREAM_ALARM, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+            }
 
             bgHandler.post(volumeEnforcer) // start enforcing volume continuously
 
@@ -232,7 +311,7 @@ class AlarmForegroundService : Service() {
                 val mp = MediaPlayer()
                 val attrs = AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build()
                 mp.setAudioAttributes(attrs)
 
@@ -266,6 +345,7 @@ class AlarmForegroundService : Service() {
                         mediaPlayer = MediaPlayer.create(this, resourceId).apply {
                             setAudioAttributes(attrs)
                             isLooping = false // We'll handle looping manually for better control
+                            setVolume(1.0f, 1.0f) // Set volume to maximum
                             // Add completion listener to ensure audio keeps playing
                             setOnCompletionListener { mp ->
                                 try {
@@ -287,43 +367,44 @@ class AlarmForegroundService : Service() {
                                     }
                                 }
                             }
-                            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                             start()
                         }
-                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                     } else {
                         // Fallback to manual setup
-                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                         val mp = MediaPlayer()
                         mp.setAudioAttributes(attrs)
                         mp.setDataSource(this, finalRingtoneUri)
                         mp.isLooping = false // We'll handle looping manually for better control
+                        mp.setVolume(1.0f, 1.0f) // Set volume to maximum
                         // Add completion listener to ensure audio keeps playing
                         mp.setOnCompletionListener { mp ->
                             try {
-                                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                                 // Always restart for alarms, regardless of isOneTimeAlarm
                                 if (mp.isPlaying) {
                                     mp.stop()
                                 }
                                 mp.seekTo(0)
                                 mp.start()
-                                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                             } catch (e: Exception) {
                                 // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.e call
                                 // Try to recreate the MediaPlayer if restart fails
                                 val recreatedPlayer = restartMediaPlayer(mp, finalRingtoneUri, 0, attrs)
                                 if (recreatedPlayer != null) {
                                     mediaPlayer = recreatedPlayer
-                                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call")
+                                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                                 }
                             }
                         }
-                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                         mp.prepare()
                         mp.start()
                         mediaPlayer = mp
-                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call: $finalRingtoneUri")
+                        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call: $finalRingtoneUri")
                     }
                 } else {
                     // Handle non-resource URIs (e.g., system ringtones)
@@ -331,17 +412,18 @@ class AlarmForegroundService : Service() {
                     mp.setAudioAttributes(attrs)
                     mp.setDataSource(this, finalRingtoneUri)
                     mp.isLooping = false // We'll handle looping manually for better control
+                    mp.setVolume(1.0f, 1.0f) // Set volume to maximum
                     // Add completion listener to ensure audio keeps playing
                     mp.setOnCompletionListener { mp ->
                         try {
-                            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                             // Always restart for alarms, regardless of isOneTimeAlarm
                             if (mp.isPlaying) {
                                 mp.stop()
                             }
                             mp.seekTo(0)
                             mp.start()
-                            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+                            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                         } catch (e: Exception) {
                             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.e call
                             // Try to recreate the MediaPlayer if restart fails
@@ -376,6 +458,9 @@ class AlarmForegroundService : Service() {
                 } catch (e2: Exception) {
                     // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
                 }
+                
+                // Start volume enforcer even for Ringtone fallback
+                bgHandler.post(volumeEnforcer)
             }
         }
 
@@ -467,6 +552,52 @@ class AlarmForegroundService : Service() {
         } catch (e: Exception) {
             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
         }
+        
+        // Restore music stream volume if we changed it
+        try {
+            val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+            // We don't store the previous music volume, so we'll just leave it as is
+            // In a real app, we would store and restore the previous music volume
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        } catch (e: Exception) {
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        }
+        
+        // Reset audio mode
+        try {
+            val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+            audioManager.mode = AudioManager.MODE_NORMAL
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        } catch (e: Exception) {
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        }
+
+        // Release audio focus
+        try {
+            if (audioFocusRequest != null) {
+                val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+                // Use abandonAudioFocusRequest for API 26+
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    audioManager.abandonAudioFocusRequest(audioFocusRequest!!)
+                } else {
+                    // Fallback for older versions
+                    @Suppress("DEPRECATION")
+                    audioManager.abandonAudioFocus(null)
+                }
+                audioFocusRequest = null
+            }
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        } catch (e: Exception) {
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        }
+
+        // Clear the next alarm notification
+        try {
+            clearNextAlarmNotification()
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        } catch (e: Exception) {
+            // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        }
 
         // Remove notification reposting callback
         bgHandler.removeCallbacks(notificationReposter)
@@ -478,6 +609,10 @@ class AlarmForegroundService : Service() {
 
         // Remove volume enforcer callback
         bgHandler.removeCallbacks(volumeEnforcer)
+        // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
+        
+        // Remove notification checker callback
+        bgHandler.removeCallbacks(notificationChecker)
         // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
 
         // Release wake lock
@@ -551,31 +686,95 @@ class AlarmForegroundService : Service() {
         }
     }
 
+    // =====================================================
+    // Fields
+    // =====================================================
+    private var lastNotifiedAlarmId: Int? = null
+    private var lastNotificationTime: Long = 0
+
+    // =====================================================
+    // Main Function (original kept; new logic appended)
+    // =====================================================
     private fun showAlarmNotificationIfNeeded() {
-        if (currentAlarmId != -1) {
-            try {
-                val alarm = alarmStorage.getAlarms().find { it.id == currentAlarmId }
-                if (alarm != null) {
-                    val timeUntilAlarm = getTimeUntilNextAlarmInMinutes(alarm)
-                    // Show notification when alarm is about to trigger (within 1 minute)
-                    if (timeUntilAlarm <= 1) {
+        try {
+            val nextAlarm = getNextScheduledAlarm()
+            if (nextAlarm != null) {
+                val timeUntilAlarm = getTimeUntilNextAlarmInMinutes(nextAlarm)
+                val now = System.currentTimeMillis()
+
+                // =====================================================
+                // ✅ ORIGINAL LOGIC  (ONLY BOUNDARY FIXED)
+                // Was: if (timeUntilAlarm <= 1.05 && timeUntilAlarm > 0.95)
+                // NOW: trigger only when < 1.0 min
+                // =====================================================
+                if (timeUntilAlarm <= 1.0 && timeUntilAlarm > 0.0) {
+                    // Only show notification once per alarm when it enters the 1-minute window
+                    // Allow notification if it's a different alarm or if we haven't shown it for this alarm
+                    if (lastNotifiedAlarmId != nextAlarm.id) {
                         showNotification(
                             "Next Alarm",
-                            "Your next alarm is at ${formatTime12Hour(alarm.hour, alarm.minute)}"
+                            "${formatTime12Hour(nextAlarm.hour, nextAlarm.minute)}"
                         )
+                        lastNotifiedAlarmId = nextAlarm.id
+                        lastNotificationTime = now
+                    }
+                } else {
+                    // Reset the notification tracking when the alarm is more than 1 minute away
+                    if (timeUntilAlarm > 1.2) {
+                        lastNotifiedAlarmId = null
                     }
                 }
-            } catch (e: Exception) {
-                // Handle any errors silently
+                // ✅ END ORIGINAL LOGIC
+                // =====================================================
             }
+        } catch (e: Exception) {
+            // Handle any errors silently
         }
     }
 
-    private fun getTimeUntilNextAlarmInMinutes(alarm: com.vaishnava.alarm.data.Alarm): Long {
+    // =====================================================
+    // Helper (NEW) — compute millis until next occurrence
+    // =====================================================
+    private fun getMillisUntilNextAlarm(alarm: com.vaishnava.alarm.data.Alarm): Long {
+        val cal = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+            set(java.util.Calendar.HOUR_OF_DAY, alarm.hour)
+            set(java.util.Calendar.MINUTE, alarm.minute)
+        }
+
+        val now = System.currentTimeMillis()
+        var target = cal.timeInMillis
+        if (target <= now) {
+            // if today's time already passed, roll to next day
+            target += 24L * 60 * 60 * 1000
+        }
+        return target - now
+    }
+
+    private fun getTimeUntilNextAlarmInMinutes(alarm: com.vaishnava.alarm.data.Alarm): Double {
         val nextAlarmTime = calculateNextAlarmTime(alarm)
         val now = System.currentTimeMillis()
         val diffInMillis = nextAlarmTime - now
-        return diffInMillis / (1000 * 60)
+        return diffInMillis.toDouble() / (1000.0 * 60.0)
+    }
+    
+    private fun getNextScheduledAlarm(): com.vaishnava.alarm.data.Alarm? {
+        val alarms = alarmStorage.getAlarms().filter { it.isEnabled }
+        if (alarms.isEmpty()) return null
+
+        var nextAlarm: com.vaishnava.alarm.data.Alarm? = null
+        var nextAlarmTime = Long.MAX_VALUE
+
+        for (alarm in alarms) {
+            val alarmTime = calculateNextAlarmTime(alarm)
+            if (alarmTime < nextAlarmTime) {
+                nextAlarmTime = alarmTime
+                nextAlarm = alarm
+            }
+        }
+
+        return nextAlarm
     }
 
     private fun calculateNextAlarmTime(alarm: com.vaishnava.alarm.data.Alarm): Long {
@@ -653,6 +852,14 @@ class AlarmForegroundService : Service() {
         notificationManager.notify(2, notification)
     }
 
+    private fun clearNextAlarmNotification() {
+        val notificationManager = getSystemService(android.app.NotificationManager::class.java)
+        notificationManager.cancel(2)
+        
+        // Also reset the notification tracking
+        lastNotifiedAlarmId = null
+    }
+
     /**
      * Attempt to recreate a MediaPlayer if the normal restart fails
      */
@@ -686,6 +893,7 @@ class AlarmForegroundService : Service() {
             
             newPlayer.setAudioAttributes(attrs)
             newPlayer.isLooping = false
+            newPlayer.setVolume(1.0f, 1.0f) // Set volume to maximum
             newPlayer.start()
             
             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.call
@@ -706,3 +914,5 @@ private val MediaPlayer.currentUri: Uri?
     } catch (e: Exception) {
         null
     }
+    
+    

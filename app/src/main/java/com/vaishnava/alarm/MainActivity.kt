@@ -1,9 +1,10 @@
 package com.vaishnava.alarm
 
 import android.Manifest
-import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.database.Cursor
 import android.media.AudioAttributes
@@ -12,22 +13,19 @@ import android.media.RingtoneManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Looper
+import android.provider.Settings
 import android.util.Log
-import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,19 +43,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AlarmAdd
 import androidx.compose.material.icons.filled.AlarmOff
-import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -70,34 +62,33 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
 import com.vaishnava.alarm.data.Alarm
 import com.vaishnava.alarm.ui.theme.AlarmTheme
-import com.vaishnava.alarm.util.PermissionUtils
 import java.util.Calendar
 
 class MainActivity : ComponentActivity() {
@@ -131,6 +122,14 @@ class MainActivity : ComponentActivity() {
         // Start a background task to check for upcoming alarms
         startAlarmNotificationChecker()
 
+        // Register broadcast receiver for clearing notifications
+        val filter = IntentFilter("com.vaishnava.alarm.CLEAR_NOTIFICATION")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(clearNotificationReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(clearNotificationReceiver, filter)
+        }
+
         setContent {
             AlarmTheme {
                 Surface(
@@ -153,17 +152,19 @@ class MainActivity : ComponentActivity() {
                                 minute = minute,
                                 isEnabled = true,
                                 ringtoneUri = ringtoneUri?.toString(),
-                                days = finalDays
+                                days = finalDays,
+                                isProtected = false
                             )
                             Log.d("AlarmApp", "Created alarm object with ID: ${alarm.id}")
                             alarmStorage.addAlarm(alarm)
                             alarmScheduler.schedule(alarm)
                             
-                            // Show notification immediately after scheduling
-                            showNotification(
-                                "Alarm Scheduled",
-                                "Your alarm is set for ${formatTime12Hour(hour, minute)}"
-                            )
+                            // Remove the immediate notification when scheduling an alarm
+                            // Notifications should only show in the last minute before the alarm triggers
+                            // showNotification(
+                            //     "Alarm Scheduled",
+                            //     "Your alarm is set for ${formatTime12Hour(hour, minute)}"
+                            // )
                             
                             alarm
                         },
@@ -199,89 +200,123 @@ class MainActivity : ComponentActivity() {
             permissionsToRequest.add(Manifest.permission.RECEIVE_BOOT_COMPLETED)
         }
 
+        // For Android 12+, we need SCHEDULE_EXACT_ALARM permission
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissionsToRequest.add(Manifest.permission.SCHEDULE_EXACT_ALARM)
+        }
+
+        // For Android 13+, we need POST_NOTIFICATIONS permission
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
         if (permissionsToRequest.isNotEmpty()) {
             requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
-        }
-
-        if (!PermissionUtils.isIgnoringBatteryOptimizations(this)) {
-            PermissionUtils.requestIgnoreBatteryOptimizations(this)
-        }
-
-        if (!PermissionUtils.canScheduleExactAlarms(this)) {
-            PermissionUtils.requestScheduleExactAlarmsPermission(this)
         }
     }
 
     private fun startAlarmNotificationChecker() {
-        // Check for upcoming alarms every minute
-        val handler = android.os.Handler(Looper.getMainLooper())
-        val runnable = object : Runnable {
-            override fun run() {
-                checkAndShowUpcomingAlarmNotification()
-                // Schedule next check in 1 minute
-                handler.postDelayed(this, 60 * 1000)
+        // Check more frequently to ensure we catch the 1-minute window
+        Thread {
+            while (true) {
+                try {
+                    Thread.sleep(2000) // Check every 2 seconds for even better precision
+                    checkAndShowUpcomingAlarmNotification()
+                    
+                    // Also check if we need to reschedule any daily alarms
+                    rescheduleDailyAlarmsIfNeeded()
+                } catch (e: InterruptedException) {
+                    break
+                }
             }
-        }
-        handler.post(runnable)
+        }.start()
     }
 
+    private fun rescheduleDailyAlarmsIfNeeded() {
+        try {
+            val now = Calendar.getInstance()
+            val currentHour = now.get(Calendar.HOUR_OF_DAY)
+            val currentMinute = now.get(Calendar.MINUTE)
+            
+            // If it's around midnight (between 12:00 AM and 12:05 AM), reschedule all daily alarms
+            // This ensures daily alarms are properly set for the new day
+            if (currentHour == 0 && currentMinute <= 5) {
+                val alarms = alarmStorage.getAlarms().filter { it.isEnabled && !it.days.isNullOrEmpty() }
+                alarms.forEach { alarm ->
+                    // Reschedule the alarm to ensure it's set for the correct day
+                    alarmScheduler.schedule(alarm)
+                    Log.d("AlarmApp", "Rescheduled daily alarm ID: ${alarm.id} at ${alarm.hour}:${alarm.minute}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("AlarmApp", "Error rescheduling daily alarms: ${e.message}", e)
+        }
+    }
+
+    // =====================================================
+    // Fields
+    // =====================================================
+    private var lastNotifiedAlarmId: Int? = null
+    private var lastNotificationTime: Long = 0
+
+    // =====================================================
+    // Main Function (original kept; new logic appended)
+    // =====================================================
     private fun checkAndShowUpcomingAlarmNotification() {
-        val nextAlarm = getNextScheduledAlarm()
-        if (nextAlarm != null) {
-            val timeUntilAlarm = getTimeUntilNextAlarmInMinutes(nextAlarm)
-            // Show notification if alarm is within 1 minute
-            if (timeUntilAlarm <= 1 && timeUntilAlarm >= 0) {
-                showNotification(
-                    "Next Alarm",
-                    "Your next alarm is at ${formatTime12Hour(nextAlarm.hour, nextAlarm.minute)}"
-                )
+        try {
+            val nextAlarm = getNextScheduledAlarm()
+            if (nextAlarm != null) {
+                val timeUntilAlarm = getTimeUntilNextAlarmInMinutes(nextAlarm)
+                val now = System.currentTimeMillis()
+
+                // =====================================================
+                // ✅ ORIGINAL LOGIC  (ONLY BOUNDARY FIXED)
+                // Was: if (timeUntilAlarm <= 1.05 && timeUntilAlarm > 0.95)
+                // NOW: trigger only when < 1.0 min
+                // =====================================================
+                if (timeUntilAlarm <= 1.0 && timeUntilAlarm > 0.0) {
+                    // Only show notification once per alarm when it enters the 1-minute window
+                    // Allow notification if it's a different alarm or if we haven't shown it for this alarm
+                    if (lastNotifiedAlarmId != nextAlarm.id) {
+                        showNotification(
+                            "Next Alarm",
+                            "${formatTime12Hour(nextAlarm.hour, nextAlarm.minute)}"
+                        )
+                        lastNotifiedAlarmId = nextAlarm.id
+                        lastNotificationTime = now
+                    }
+                } else {
+                    // Reset the notification tracking when the alarm is more than 1 minute away
+                    if (timeUntilAlarm > 1.2) {
+                        lastNotifiedAlarmId = null
+                    }
+                }
+                // ✅ END ORIGINAL LOGIC
+                // =====================================================
             }
+        } catch (e: Exception) {
+            Log.e("AlarmApp", "Error checking upcoming alarms: ${e.message}", e)
         }
     }
 
-    private fun getTimeUntilNextAlarmInMinutes(alarm: Alarm): Long {
-        val nextAlarmTime = calculateNextAlarmTime(alarm)
+    // =====================================================
+    // Helper (NEW) — compute millis until next occurrence
+    // =====================================================
+    private fun getMillisUntilNextAlarm(alarm: Alarm): Long {
+        val cal = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+            set(java.util.Calendar.HOUR_OF_DAY, alarm.hour)
+            set(java.util.Calendar.MINUTE, alarm.minute)
+        }
+
         val now = System.currentTimeMillis()
-        val diffInMillis = nextAlarmTime - now
-        return diffInMillis / (1000 * 60)
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-
-        when (requestCode) {
-            batteryOptimizationRequestCode -> {
-                if (PermissionUtils.isIgnoringBatteryOptimizations(this)) {
-                    Log.d("AlarmApp", "Battery optimization whitelist granted")
-                } else {
-                    Log.e("AlarmApp", "Battery optimization whitelist denied")
-                }
-            }
-            scheduleExactAlarmRequestCode -> {
-                if (PermissionUtils.canScheduleExactAlarms(this)) {
-                    Log.d("AlarmApp", "Schedule exact alarm permission granted")
-                } else {
-                    Log.e("AlarmApp", "Schedule exact alarm permission denied")
-                }
-            }
+        var target = cal.timeInMillis
+        if (target <= now) {
+            // if today's time already passed, roll to next day
+            target += 24L * 60 * 60 * 1000
         }
-    }
-
-    fun showNextAlarmNotification() {
-        val nextAlarm = getNextScheduledAlarm()
-
-        if (nextAlarm != null) {
-            val timeUntilAlarm = getTimeUntilNextAlarm(nextAlarm)
-            showNotification(
-                "Next Alarm",
-                "Your next alarm is at ${formatTime12Hour(nextAlarm.hour, nextAlarm.minute)} in $timeUntilAlarm"
-            )
-        } else {
-            showNotification(
-                "No Alarms",
-                "You don't have any alarms scheduled"
-            )
-        }
+        return target - now
     }
 
     private fun getNextScheduledAlarm(): Alarm? {
@@ -316,14 +351,15 @@ class MainActivity : ComponentActivity() {
             val currentHour = now.get(Calendar.HOUR_OF_DAY)
             val currentMinute = now.get(Calendar.MINUTE)
 
+            // Check if today is a valid day and the alarm time hasn't passed yet
             if (alarm.days.contains(currentDay)) {
                 if (alarm.hour > currentHour ||
-                    (alarm.hour == currentHour && alarm.minute > currentMinute)
-                ) {
+                    (alarm.hour == currentHour && alarm.minute > currentMinute)) {
                     return alarmCalendar.timeInMillis
                 }
             }
 
+            // Look for the next valid day
             for (i in 1..7) {
                 val checkDay = (currentDay + i - 1) % 7 + 1
                 if (alarm.days.contains(checkDay)) {
@@ -332,29 +368,24 @@ class MainActivity : ComponentActivity() {
                 }
             }
         } else {
+            // For one-time alarms (including the protected 5 AM alarm), 
+            // if the time has passed today, schedule for tomorrow
             if (alarmCalendar.timeInMillis <= now.timeInMillis) {
                 alarmCalendar.add(Calendar.DAY_OF_YEAR, 1)
             }
             return alarmCalendar.timeInMillis
         }
 
+        // Fallback - add one day
+        alarmCalendar.add(Calendar.DAY_OF_YEAR, 1)
         return alarmCalendar.timeInMillis
     }
 
-    private fun getTimeUntilNextAlarm(alarm: Alarm): String {
+    private fun getTimeUntilNextAlarmInMinutes(alarm: Alarm): Double {
         val nextAlarmTime = calculateNextAlarmTime(alarm)
         val now = System.currentTimeMillis()
         val diffInMillis = nextAlarmTime - now
-
-        val minutes = diffInMillis / (1000 * 60)
-        val hours = minutes / 60
-        val remainingMinutes = minutes % 60
-
-        return when {
-            hours > 0 -> "${hours}h ${remainingMinutes}m"
-            minutes > 0 -> "${minutes} minutes"
-            else -> "less than a minute"
-        }
+        return diffInMillis.toDouble() / (1000.0 * 60.0)
     }
 
     private fun showNotification(title: String, content: String) {
@@ -383,6 +414,55 @@ class MainActivity : ComponentActivity() {
         notificationManager.notify(2, notification)
     }
 
+    private fun clearNotification() {
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        notificationManager.cancel(2)
+    }
+
+    private fun scheduleProtectedDefaultAlarm() {
+        val defaultAlarmHour = 5
+        val defaultAlarmMinute = 0
+        val defaultRingtoneUri =
+            Uri.parse("android.resource://${packageName}/raw/glassy_bell")
+        val defaultDays = listOf(
+            Calendar.SUNDAY,
+            Calendar.MONDAY,
+            Calendar.TUESDAY,
+            Calendar.WEDNESDAY,
+            Calendar.THURSDAY,
+            Calendar.FRIDAY,
+            Calendar.SATURDAY
+        )
+
+        val existingDefaultAlarm = alarmStorage.getAlarms().firstOrNull {
+            it.hour == defaultAlarmHour &&
+                    it.minute == defaultAlarmMinute &&
+                    it.ringtoneUri == defaultRingtoneUri.toString() &&
+                    it.days?.containsAll(defaultDays) == true &&
+                    it.isProtected
+        }
+
+        if (existingDefaultAlarm == null) {
+            val alarmId = alarmStorage.getNextAlarmId()
+            val protectedDefaultAlarm = Alarm(
+                id = alarmId,
+                hour = defaultAlarmHour,
+                minute = defaultAlarmMinute,
+                isEnabled = true,
+                ringtoneUri = defaultRingtoneUri.toString(),
+                days = defaultDays,
+                isHidden = false,
+                isProtected = true
+            )
+            alarmStorage.addAlarm(protectedDefaultAlarm)
+            alarmScheduler.schedule(protectedDefaultAlarm)
+            markAlarmSet(true)
+            Log.d("AlarmApp", "✅ Protected default 5 AM alarm scheduled")
+        } else {
+            Log.d("AlarmApp", "ℹ️ Protected default 5 AM alarm already exists.")
+        }
+    }
+
     private fun scheduleAndSaveAlarm(
         hour: Int,
         minute: Int,
@@ -400,7 +480,8 @@ class MainActivity : ComponentActivity() {
             isEnabled = true,
             ringtoneUri = ringtoneUriString,
             days = days.toList(),
-            isHidden = false
+            isHidden = false,
+            isProtected = false
         )
         alarmStorage.addAlarm(alarm)
         alarmScheduler.schedule(alarm)
@@ -422,17 +503,38 @@ class MainActivity : ComponentActivity() {
             // updateNextAlarmNotification()
         }
     }
+
+    public fun markAlarmSet(value: Boolean) {
+        val prefs = getSharedPreferences("AlarmPrefs", Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("alarm_set", value).apply()
+    }
+    private val clearNotificationReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == "com.vaishnava.alarm.CLEAR_NOTIFICATION") {
+                clearNotification()
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(clearNotificationReceiver)
+        } catch (e: Exception) {
+            // Ignore if receiver was not registered
+        }
+    }
 }
 
 fun formatDays(days: List<Int>?): String {
     if (days.isNullOrEmpty()) return "No days selected"
     val dayMap = mapOf(
         Calendar.SUNDAY to "Su",
-        Calendar.MONDAY to "M",
+        Calendar.MONDAY to "Mo",
         Calendar.TUESDAY to "Tu",
-        Calendar.WEDNESDAY to "W",
+        Calendar.WEDNESDAY to "We",
         Calendar.THURSDAY to "Th",
-        Calendar.FRIDAY to "F",
+        Calendar.FRIDAY to "Fr",
         Calendar.SATURDAY to "Sa"
     )
     return days.sorted().joinToString(", ") { dayMap[it] ?: "" }
@@ -510,26 +612,13 @@ fun AlarmScreenContent(
                     .padding(vertical = 18.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(72.dp)
-                        .background(
-                            brush = Brush.radialGradient(
-                                colors = listOf(Color(0xFF6A11CB), Color(0xFF2575FC)),
-                                center = androidx.compose.ui.geometry.Offset(36.dp.value, 36.dp.value),
-                                radius = 36.dp.value
-                            ),
-                            shape = CircleShape
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Alarm,
-                        contentDescription = "Alarm Icon",
-                        tint = Color.White,
-                        modifier = Modifier.size(40.dp)
-                    )
-                }
+                // Replace the alarm icon with the app logo using Image composable
+                // Use the webp file directly from mipmap
+                Image(
+                    painter = painterResource(id = R.mipmap.ic_launcher_foreground),
+                    contentDescription = "App Logo",
+                    modifier = Modifier.size(72.dp)
+                )
 
                 Spacer(Modifier.height(12.dp))
 
@@ -595,9 +684,7 @@ fun AlarmScreenContent(
                 if (alarms.isEmpty()) {
                     item {
                         Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(28.dp),
+                            modifier = Modifier.fillMaxSize(),
                             contentAlignment = Alignment.Center
                         ) {
                             Card(
@@ -692,8 +779,10 @@ fun AlarmScreenContent(
             onClick = {
                 // Initialize dialog time from system state or defaults
                 val now = Calendar.getInstance()
-                timeHour.value = 7
-                timeMinute.value = 0
+                // Add 1 second to the current time to ensure the alarm is in the future
+                now.add(Calendar.SECOND, 1)
+                timeHour.value = now.get(Calendar.HOUR_OF_DAY)
+                timeMinute.value = now.get(Calendar.MINUTE)
                 showAddDialog.value = true
             },
             modifier = Modifier
@@ -701,404 +790,584 @@ fun AlarmScreenContent(
                 .padding(16.dp)
                 .navigationBarsPadding(),
             containerColor = MaterialTheme.colorScheme.primary,
-            elevation = FloatingActionButtonDefaults.elevation(8.dp)
+            elevation = FloatingActionButtonDefaults.elevation(6.dp)
         ) {
             Icon(
                 imageVector = Icons.Filled.Add,
                 contentDescription = "Add Alarm",
-                tint = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(28.dp)
+                tint = MaterialTheme.colorScheme.onPrimary
             )
         }
+    }
 
-        // --------------- Add Alarm Dialog ----------------
-        if (showAddDialog.value) {
-            // Use a scrollable AlertDialog; time UI here is robust and won't wrap AM/PM
-            AlertDialog(
-                onDismissRequest = { showAddDialog.value = false },
-                title = {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Add New Alarm", fontWeight = FontWeight.Bold)
-                        Icon(
-                            imageVector = Icons.Filled.AlarmAdd,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
+    // Add Alarm Dialog
+    if (showAddDialog.value) {
+        AddAlarmDialog(
+            timeHour = timeHour,
+            timeMinute = timeMinute,
+            selectedDaysState = selectedDaysState,
+            selectedRingtoneUriState = selectedRingtoneUriState,
+            onDismissRequest = { showAddDialog.value = false },
+            onConfirm = { hour, minute, ringtoneUri, days ->
+                scheduleAlarmCallback(hour, minute, ringtoneUri, days)
+                showAddDialog.value = false
+                // Refresh the alarms list
+                alarms.clear()
+                alarms.addAll(alarmStorage.getAlarms())
+            },
+            mediaPlayerState = mediaPlayerState,
+            showRingtonePicker = showRingtonePicker
+        )
+    }
+}
+
+@Composable
+fun DayToggleButtons(selectedDays: Set<Int>, onDayToggle: (Int) -> Unit) {
+    val days = listOf(
+        Calendar.SUNDAY to "Su",
+        Calendar.MONDAY to "Mo",
+        Calendar.TUESDAY to "Tu",
+        Calendar.WEDNESDAY to "We",
+        Calendar.THURSDAY to "Th",
+        Calendar.FRIDAY to "Fr",
+        Calendar.SATURDAY to "Sa"
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        days.forEach { (day, label) ->
+            Card(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clickable { onDayToggle(day) },
+                shape = CircleShape,
+                colors = CardDefaults.cardColors(
+                    containerColor = if (selectedDays.contains(day)) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant
                     }
-                },
-                text = {
-                    Column(
-                        modifier = Modifier
-                            .verticalScroll(rememberScrollState())
-                            .fillMaxWidth()
-                    ) {
-                        // Top Time Card - replicates original visual style but ensures AM/PM never wraps
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 12.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f)
-                            ),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(14.dp),
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Text(
-                                    text = "Set Time",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(bottom = 8.dp)
-                                )
-
-                                // Large time display + AM/PM pills arranged horizontally with guaranteed spacing
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.Center,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    val hour = timeHour.value
-                                    val minute = timeMinute.value
-                                    val period = if (hour >= 12) "PM" else "AM"
-                                    val displayHour = when {
-                                        hour == 0 -> 12
-                                        hour > 12 -> hour - 12
-                                        else -> hour
-                                    }
-
-                                    // big numeric group
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.Center
-                                    ) {
-                                        // Hour display with swipe gestures
-                                        Box(
-                                            modifier = Modifier
-                                                .size(80.dp)
-                                                .pointerInput(Unit) {
-                                                    var hasTriggered = false
-                                                    
-                                                    detectVerticalDragGestures(
-                                                        onDragStart = {
-                                                            hasTriggered = false
-                                                        },
-                                                        onDragEnd = {
-                                                            hasTriggered = false
-                                                        },
-                                                        onDragCancel = {
-                                                            hasTriggered = false
-                                                        }
-                                                    ) { change, dragAmount ->
-                                                        // Only trigger once per complete drag gesture
-                                                        if (!hasTriggered && kotlin.math.abs(dragAmount) > 15f) {
-                                                            if (dragAmount < 0) {
-                                                                // Swipe up - increase hour by 1
-                                                                timeHour.value = (timeHour.value + 1) % 24
-                                                            } else {
-                                                                // Swipe down - decrease hour by 1
-                                                                timeHour.value = if (timeHour.value > 0) timeHour.value - 1 else 23
-                                                            }
-                                                            hasTriggered = true
-                                                            change.consume()
-                                                        }
-                                                    }
-                                                },
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                text = String.format("%02d", displayHour),
-                                                fontSize = 44.sp,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            )
-                                        }
-
-                                        Text(
-                                            text = ":",
-                                            fontSize = 44.sp,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            modifier = Modifier.padding(horizontal = 8.dp)
-                                        )
-
-                                        // Minute display with swipe gestures
-                                        Box(
-                                            modifier = Modifier
-                                                .size(80.dp)
-                                                .pointerInput(Unit) {
-                                                    var hasTriggered = false
-                                                    
-                                                    detectVerticalDragGestures(
-                                                        onDragStart = {
-                                                            hasTriggered = false
-                                                        },
-                                                        onDragEnd = {
-                                                            hasTriggered = false
-                                                        },
-                                                        onDragCancel = {
-                                                            hasTriggered = false
-                                                        }
-                                                    ) { change, dragAmount ->
-                                                        // Only trigger once per complete drag gesture
-                                                        if (!hasTriggered && kotlin.math.abs(dragAmount) > 15f) {
-                                                            if (dragAmount < 0) {
-                                                                // Swipe up - increase minute by 1
-                                                                timeMinute.value = (timeMinute.value + 1) % 60
-                                                            } else {
-                                                                // Swipe down - decrease minute by 1
-                                                                timeMinute.value = if (timeMinute.value > 0) timeMinute.value - 1 else 59
-                                                            }
-                                                            hasTriggered = true
-                                                            change.consume()
-                                                        }
-                                                    }
-                                                },
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text(
-                                                text = String.format("%02d", minute),
-                                                fontSize = 44.sp,
-                                                fontWeight = FontWeight.ExtraBold,
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            )
-                                        }
-                                    }
-
-                                    Spacer(modifier = Modifier.width(14.dp))
-
-                                    // AM/PM selection using Buttons for reliable text display
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        // AM button
-                                        Button(
-                                            onClick = {
-                                                if (timeHour.value >= 12) timeHour.value = timeHour.value - 12
-                                            },
-                                            modifier = Modifier
-                                                .padding(bottom = 6.dp)
-                                                .size(60.dp, 40.dp),
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = if (period == "AM") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
-                                            ),
-                                            shape = RoundedCornerShape(12.dp),
-                                            contentPadding = PaddingValues(0.dp)
-                                        ) {
-                                            Text(
-                                                text = "AM",
-                                                fontWeight = if (period == "AM") FontWeight.Bold else FontWeight.Normal,
-                                                color = if (period == "AM") MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                                                fontSize = 18.sp,
-                                                maxLines = 1,
-                                                softWrap = false
-                                            )
-                                        }
-
-                                        // PM button
-                                        Button(
-                                            onClick = {
-                                                if (timeHour.value < 12) timeHour.value = (timeHour.value + 12) % 24
-                                            },
-                                            modifier = Modifier
-                                                .size(60.dp, 40.dp),
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = if (period == "PM") MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
-                                            ),
-                                            shape = RoundedCornerShape(12.dp),
-                                            contentPadding = PaddingValues(0.dp)
-                                        ) {
-                                            Text(
-                                                text = "PM",
-                                                fontWeight = if (period == "PM") FontWeight.Bold else FontWeight.Normal,
-                                                color = if (period == "PM") MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                                                fontSize = 18.sp,
-                                                maxLines = 1,
-                                                softWrap = false
-                                            )
-                                        }
-                                    }
-                                }
-
-                                Spacer(modifier = Modifier.height(10.dp))
-
-                                // Note: preserved style and simple guidance text
-                                Text(
-                                    text = "Tap numbers to adjust hour and minute. Tap AM/PM to switch.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(top = 6.dp)
-                                )
-                            }
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = label,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (selectedDays.contains(day)) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
                         }
+                    )
+                }
+            }
+        }
+    }
+}
 
-                        // Days selection card (same logic)
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 12.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f)
-                            ),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Text(
-                                    text = "Select Days",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(bottom = 8.dp)
-                                )
-                                val daysOfWeek = listOf(
-                                    Pair(Calendar.SUNDAY, "Su"),
-                                    Pair(Calendar.MONDAY, "Mo"),
-                                    Pair(Calendar.TUESDAY, "Tu"),
-                                    Pair(Calendar.WEDNESDAY, "We"),
-                                    Pair(Calendar.THURSDAY, "Th"),
-                                    Pair(Calendar.FRIDAY, "Fr"),
-                                    Pair(Calendar.SATURDAY, "Sa")
-                                )
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceEvenly
-                                ) {
-                                    daysOfWeek.forEach { (dayInt, dayString) ->
-                                        DayToggleButton(
-                                            day = dayInt,
-                                            dayString = dayString,
-                                            selectedDays = selectedDaysState.value,
-                                            onDaySelected = { day, isSelected ->
-                                                selectedDaysState.value =
-                                                    if (isSelected) selectedDaysState.value + day else selectedDaysState.value - day
+@Composable
+fun AlarmItem(
+    alarm: Alarm,
+    onRemove: (Alarm) -> Unit,
+    onToggleEnable: (Alarm, Boolean) -> Unit
+) {
+    val context = LocalContext.current
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = formatTime12Hour(alarm.hour, alarm.minute),
+                    style = MaterialTheme.typography.headlineSmall
+                )
+                Text(
+                    text = formatDays(alarm.days),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray
+                )
+                if (alarm.isProtected && !(alarm.hour == 5 && alarm.minute == 0)) {
+                    Text("Protected Alarm", color = Color.Red)
+                }
+                val ringtoneTitle = remember(alarm.ringtoneUri) {
+                    try {
+                        if (alarm.ringtoneUri != null) {
+                            // Handle glassy_bell resource properly
+                            if (alarm.ringtoneUri.contains("glassy_bell")) {
+                                "🎵 glassy_bell"
+                            } else if (alarm.ringtoneUri.startsWith("android.resource://")) {
+                                // Handle other resource URIs
+                                val uriString = alarm.ringtoneUri
+                                if (uriString.contains("/raw/")) {
+                                    // Extract resource name from path format: android.resource://package/raw/resourceName
+                                    val segments = uriString.split("/")
+                                    if (segments.size > 3) {
+                                        "🎵 ${segments[3]}"
+                                    } else {
+                                        "🎵 Custom Ringtone"
+                                    }
+                                } else {
+                                    // Extract resource name from ID format: android.resource://package/resourceId
+                                    val segments = uriString.split("/")
+                                    if (segments.size > 3) {
+                                        try {
+                                            val resourceId = segments[3].toInt()
+                                            // Try to get resource name, fallback to "🎵 Custom Ringtone" if fails
+                                            try {
+                                                context.resources.getResourceEntryName(resourceId)
+                                            } catch (e: Exception) {
+                                                "🎵 Custom Ringtone"
                                             }
-                                        )
+                                        } catch (e: NumberFormatException) {
+                                            "🎵 Custom Ringtone"
+                                        }
+                                    } else {
+                                        "🎵 Custom Ringtone"
                                     }
                                 }
+                            } else {
+                                // Handle system ringtones
+                                val uri = Uri.parse(alarm.ringtoneUri)
+                                val ringtone = RingtoneManager.getRingtone(context, uri)
+                                ringtone?.getTitle(context) ?: "Unknown Ringtone"
                             }
+                        } else {
+                            "Unknown Ringtone"
                         }
-
-                        // Ringtone card (same as before)
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth(),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.95f)
-                            ),
-                            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Text(
-                                    text = "Ringtone",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(bottom = 8.dp)
-                                )
-
-                                Button(
-                                    onClick = { showRingtonePicker.value = true },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 6.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = MaterialTheme.colorScheme.primary
-                                    )
-                                ) {
-                                    Text(
-                                        "Select Ringtone",
-                                        color = MaterialTheme.colorScheme.onPrimary
-                                    )
-                                }
-
-                                if (selectedRingtoneUriState.value == null) {
-                                    Text(
-                                        text = "* Please select a ringtone",
-                                        color = MaterialTheme.colorScheme.error,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        modifier = Modifier.padding(top = 6.dp)
-                                    )
-                                }
-                            }
+                    } catch (e: Exception) {
+                        // Fallback for any errors
+                        if (alarm.ringtoneUri?.contains("glassy_bell") == true) {
+                            "🎵 glassy_bell"
+                        } else {
+                            "🎵 Custom Ringtone"
                         }
                     }
-                },
-                confirmButton = {
-                    Button(
-                        onClick = {
-                            Log.d("AlarmApp", "Create Alarm button clicked")
-                            Log.d("AlarmApp", "Current time - Hour: ${timeHour.value}, Minute: ${timeMinute.value}")
-                            Log.d("AlarmApp", "Selected days: ${selectedDaysState.value}")
-                            Log.d("AlarmApp", "Selected ringtone: ${selectedRingtoneUriState.value}")
-                            val newAlarm = scheduleAlarmCallback(
-                                timeHour.value,
-                                timeMinute.value,
-                                selectedRingtoneUriState.value,
-                                selectedDaysState.value
-                            )
-                            val exists = alarms.any { it.id == newAlarm.id }
-                            if (!exists) alarms.add(newAlarm)
+                }
+                Text(
+                    text = ringtoneTitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
 
-                            selectedDaysState.value = emptySet()
-                            selectedRingtoneUriState.value = null
-                            showAddDialog.value = false
-                        },
-                        enabled = selectedRingtoneUriState.value != null,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF64FFDA)
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = "Create Alarm",
-                            color = Color.Black,
-                            fontWeight = FontWeight.Bold
+            Row(
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Switch(
+                    checked = alarm.isEnabled,
+                    onCheckedChange = { enabled -> onToggleEnable(alarm, enabled) },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = MaterialTheme.colorScheme.primary,
+                        checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    )
+                )
+                Spacer(Modifier.width(8.dp))
+                IconButton(
+                    onClick = { onRemove(alarm) },
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(
+                            MaterialTheme.colorScheme.errorContainer,
+                            CircleShape
                         )
-                    }
-                },
-                dismissButton = {
-                    OutlinedButton(
-                        onClick = { showAddDialog.value = false },
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Delete,
+                        contentDescription = "Delete Alarm",
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AddAlarmDialog(
+    timeHour: MutableState<Int>,
+    timeMinute: MutableState<Int>,
+    selectedDaysState: MutableState<Set<Int>>,
+    selectedRingtoneUriState: MutableState<Uri?>,
+    onDismissRequest: () -> Unit,
+    onConfirm: (Int, Int, Uri?, Set<Int>) -> Unit,
+    mediaPlayerState: MutableState<MediaPlayer?>,
+    showRingtonePicker: MutableState<Boolean>
+) {
+    val context = LocalContext.current
+    // Move these calculations inside the Composable so they update correctly
+    val displayHour = remember(timeHour.value) {
+        if (timeHour.value == 0) 12 else if (timeHour.value > 12) timeHour.value - 12 else timeHour.value
+    }
+    val amPm = remember(timeHour.value) {
+        if (timeHour.value >= 12) "PM" else "AM"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Add New Alarm")
+                Icon(
+                    imageVector = Icons.Filled.AlarmAdd,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Time selection with swipe controls
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    // Hour selector with swipe up/down
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .size(80.dp)
+                            .pointerInput(Unit) {
+                                var hasTriggered = false
+                                var totalDrag = 0f
+
+                                detectVerticalDragGestures(
+                                    onDragStart = {
+                                        hasTriggered = false
+                                        totalDrag = 0f
+                                    },
+                                    onDragEnd = {
+                                        hasTriggered = false
+                                        totalDrag = 0f
+                                    }
+                                ) { change, dragAmount ->
+                                    totalDrag += dragAmount
+                                    
+                                    // Only trigger once per drag gesture
+                                    if (!hasTriggered && kotlin.math.abs(totalDrag) > 30f) {
+                                        if (totalDrag < 0) {
+                                            // Swipe up - increase hour
+                                            timeHour.value = (timeHour.value + 1) % 24
+                                        } else {
+                                            // Swipe down - decrease hour
+                                            timeHour.value = if (timeHour.value > 0) timeHour.value - 1 else 23
+                                        }
+                                        hasTriggered = true
+                                        totalDrag = 0f
+                                    }
+                                    change.consume()
+                                }
+                            },
+                        contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "Cancel",
+                            text = String.format("%02d", displayHour),
+                            fontSize = 44.sp,
+                            fontWeight = FontWeight.ExtraBold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     }
-                }
-            )
-        }
 
-        // Ringtone picker dialog (unchanged behavior)
-        if (showRingtonePicker.value) {
-            CustomRingtonePicker(
-                context = context,
-                onRingtoneSelected = { uri ->
-                    selectedRingtoneUriState.value = uri
-                    showRingtonePicker.value = false
+                    // Colon separator
+                    Text(
+                        text = ":",
+                        fontSize = 36.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier
+                            .padding(horizontal = 8.dp)
+                            .align(Alignment.Bottom)
+                    )
+
+                    // Minute selector with swipe up/down
+                    Box(
+                        modifier = Modifier
+                            .size(80.dp)
+                            .pointerInput(Unit) {
+                                var hasTriggered = false
+                                var totalDrag = 0f
+
+                                detectVerticalDragGestures(
+                                    onDragStart = {
+                                        hasTriggered = false
+                                        totalDrag = 0f
+                                    },
+                                    onDragEnd = {
+                                        hasTriggered = false
+                                        totalDrag = 0f
+                                    }
+                                ) { change, dragAmount ->
+                                    totalDrag += dragAmount
+                                    
+                                    // Only trigger once per drag gesture
+                                    if (!hasTriggered && kotlin.math.abs(totalDrag) > 30f) {
+                                        if (totalDrag < 0) {
+                                            // Swipe up - increase minute
+                                            timeMinute.value = (timeMinute.value + 1) % 60
+                                        } else {
+                                            // Swipe down - decrease minute
+                                            timeMinute.value = if (timeMinute.value > 0) timeMinute.value - 1 else 59
+                                        }
+                                        hasTriggered = true
+                                        totalDrag = 0f
+                                    }
+                                    change.consume()
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = String.format("%02d", timeMinute.value),
+                            fontSize = 44.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    // AM/PM indicator - Make sure it updates correctly
+                    Box(
+                        modifier = Modifier
+                            .width(60.dp)
+                            .padding(start = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        // Nested Box to properly center the text
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.primary)
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = amPm, // This should update correctly now
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
+                    }
+                }
+
+                // Day selection
+                Text(
+                    text = "Repeat",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .align(Alignment.Start)
+                        .padding(top = 16.dp, bottom = 8.dp)
+                )
+                DayToggleButtons(
+                    selectedDays = selectedDaysState.value,
+                    onDayToggle = { day ->
+                        selectedDaysState.value = if (selectedDaysState.value.contains(day)) {
+                            selectedDaysState.value - day
+                        } else {
+                            selectedDaysState.value + day
+                        }
+                    }
+                )
+
+                // Ringtone selection
+                Text(
+                    text = "Ringtone",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .align(Alignment.Start)
+                        .padding(top = 16.dp, bottom = 8.dp)
+                )
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .clickable { showRingtonePicker.value = true },
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Audiotrack,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier
+                                .size(24.dp)
+                                .padding(end = 12.dp)
+                        )
+                        Column(
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = "Select Ringtone",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            val ringtoneName = remember(selectedRingtoneUriState.value) {
+                                if (selectedRingtoneUriState.value == null) {
+                                    "None selected"
+                                } else {
+                                    try {
+                                        // Handle glassy_bell resource properly
+                                        if (selectedRingtoneUriState.value.toString().contains("glassy_bell")) {
+                                            "🎵 glassy_bell"
+                                        } else if (selectedRingtoneUriState.value.toString().startsWith("android.resource://")) {
+                                            // Handle other resource URIs
+                                            val uriString = selectedRingtoneUriState.value.toString()
+                                            if (uriString.contains("/raw/")) {
+                                                // Extract resource name from path format: android.resource://package/raw/resourceName
+                                                val segments = uriString.split("/")
+                                                if (segments.size > 3) {
+                                                    "🎵 ${segments[3]}"
+                                                } else {
+                                                    "🎵 Custom Ringtone"
+                                                }
+                                            } else {
+                                                // Extract resource name from ID format: android.resource://package/resourceId
+                                                val segments = uriString.split("/")
+                                                if (segments.size > 3) {
+                                                    try {
+                                                        val resourceId = segments[3].toInt()
+                                                        // Try to get resource name, fallback to "🎵 Custom Ringtone" if fails
+                                                        try {
+                                                            context.resources.getResourceEntryName(resourceId)
+                                                        } catch (e: Exception) {
+                                                            "🎵 Custom Ringtone"
+                                                        }
+                                                    } catch (e: NumberFormatException) {
+                                                        "🎵 Custom Ringtone"
+                                                    }
+                                                } else {
+                                                    "🎵 Custom Ringtone"
+                                                }
+                                            }
+                                        } else {
+                                            // Handle system ringtones
+                                            val ringtone = RingtoneManager.getRingtone(context, selectedRingtoneUriState.value)
+                                            ringtone?.getTitle(context) ?: "Unknown Ringtone"
+                                        }
+                                    } catch (e: Exception) {
+                                        // Fallback for any errors
+                                        if (selectedRingtoneUriState.value.toString().contains("glassy_bell")) {
+                                            "🎵 glassy_bell"
+                                        } else {
+                                            "🎵 Custom Ringtone"
+                                        }
+                                    }
+                                }
+                            }
+                            Text(
+                                text = ringtoneName,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Filled.KeyboardArrowUp,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onConfirm(
+                        timeHour.value,
+                        timeMinute.value,
+                        selectedRingtoneUriState.value,
+                        selectedDaysState.value
+                    )
                 },
-                onDismiss = {
-                    mediaPlayerState.value?.stop()
-                    mediaPlayerState.value?.release()
-                    mediaPlayerState.value = null
-                    showRingtonePicker.value = false
-                },
-                mediaPlayerState = mediaPlayerState
-            )
+                enabled = selectedRingtoneUriState.value != null,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = "Create Alarm",
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        dismissButton = {
+            OutlinedButton(
+                onClick = onDismissRequest,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = "Cancel",
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
         }
+    )
+
+    // Ringtone picker dialog
+    if (showRingtonePicker.value) {
+        CustomRingtonePicker(
+            context = context,
+            onRingtoneSelected = { uri ->
+                selectedRingtoneUriState.value = uri
+                showRingtonePicker.value = false
+            },
+            onDismiss = {
+                mediaPlayerState.value?.stop()
+                mediaPlayerState.value?.release()
+                mediaPlayerState.value = null
+                showRingtonePicker.value = false
+            },
+            mediaPlayerState = mediaPlayerState
+        )
     }
 }
 
@@ -1123,7 +1392,6 @@ fun DayToggleButton(
                 shape = RoundedCornerShape(10.dp)
             )
             .clickable {
-                Log.d("DayToggleButton", "Day $dayString clicked, isSelected: ${!isSelected}")
                 onDaySelected(day, !isSelected)
             },
         contentAlignment = Alignment.Center
@@ -1339,124 +1607,4 @@ fun CustomRingtonePicker(
             }
         }
     )
-}
-
-@Composable
-fun AlarmItem(
-    alarm: Alarm,
-    onRemove: (Alarm) -> Unit,
-    onToggleEnable: (Alarm, Boolean) -> Unit
-) {
-    val context = LocalContext.current
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-        shape = RoundedCornerShape(10.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = if (alarm.isEnabled) Icons.Filled.Alarm else Icons.Filled.AlarmOff,
-                        contentDescription = null,
-                        tint = if (alarm.isEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                        modifier = Modifier
-                            .size(20.dp)
-                            .padding(end = 8.dp)
-                    )
-                    Text(
-                        text = formatTime12Hour(alarm.hour, alarm.minute),
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = if (alarm.isEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline
-                    )
-                }
-                Text(
-                    text = formatDays(alarm.days),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-                val ringtoneTitle = remember(alarm.ringtoneUri) {
-                    try {
-                        if (alarm.ringtoneUri != null) {
-                            if (alarm.ringtoneUri.contains("glassy_bell")) {
-                                return@remember "🎵 glassy_bell"
-                            }
-                            if (alarm.ringtoneUri.startsWith("android.resource://")) {
-                                val segments = alarm.ringtoneUri.split("/")
-                                if (segments.size > 0) {
-                                    val resourceId = segments.last()
-                                    try {
-                                        val resId = resourceId.toInt()
-                                        val resourceName = context.resources.getResourceEntryName(resId)
-                                        return@remember "🎵 $resourceName"
-                                    } catch (e: Exception) {
-                                        return@remember "🎵 Custom Ringtone"
-                                    }
-                                }
-                            }
-                            val uri = Uri.parse(alarm.ringtoneUri)
-                            val ringtone = RingtoneManager.getRingtone(context, uri)
-                            ringtone?.getTitle(context) ?: "Unknown Ringtone"
-                        } else {
-                            "Unknown Ringtone"
-                        }
-                    } catch (e: Exception) {
-                        "Error getting ringtone name"
-                    }
-                }
-                Text(
-                    text = ringtoneTitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Switch(
-                    checked = alarm.isEnabled,
-                    onCheckedChange = { onToggleEnable(alarm, it) },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = MaterialTheme.colorScheme.primary,
-                        checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                        uncheckedThumbColor = MaterialTheme.colorScheme.outline,
-                        uncheckedTrackColor = MaterialTheme.colorScheme.surface
-                    )
-                )
-                Spacer(Modifier.height(10.dp))
-                IconButton(
-                    onClick = { onRemove(alarm) },
-                    modifier = Modifier
-                        .size(40.dp)
-                        .background(
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            shape = RoundedCornerShape(10.dp)
-                        )
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Delete,
-                        contentDescription = "Delete Alarm",
-                        tint = MaterialTheme.colorScheme.onErrorContainer,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
-        }
-    }
 }
