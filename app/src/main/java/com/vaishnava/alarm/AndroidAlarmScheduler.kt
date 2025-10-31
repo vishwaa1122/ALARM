@@ -177,25 +177,33 @@ class AndroidAlarmScheduler(private val context: Context) : AlarmScheduler {
         }
 
         try {
-            // Use setExactAndAllowWhileIdle for all alarms
-            alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                triggerAtMillis,
-                pendingIntent
+            // Prefer setAlarmClock for highest reliability and system UI integration
+            val showIntent = android.app.PendingIntent.getActivity(
+                context,
+                alarm.id,
+                Intent(context, AlarmActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    putExtra(AlarmReceiver.ALARM_ID, alarm.id)
+                    putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri)
+                    putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            Log.d("AlarmScheduler", "✅ Alarm ID ${alarm.id} successfully scheduled via setExactAndAllowWhileIdle")
+            val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showIntent)
+            alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+            Log.d("AlarmScheduler", "✅ Alarm ID ${alarm.id} scheduled via setAlarmClock")
         } catch (e: Exception) {
             Log.e("AlarmScheduler", "❌ Failed to schedule alarm ID ${alarm.id}: ${e.message}", e)
             
             // Try fallback method
             try {
-                Log.d("AlarmScheduler", "Trying fallback method...")
-                alarmManager.set(
+                Log.d("AlarmScheduler", "Trying fallback method setExactAndAllowWhileIdle...")
+                alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     triggerAtMillis,
                     pendingIntent
                 )
-                Log.d("AlarmScheduler", "✅ Alarm ID ${alarm.id} scheduled via fallback set() method")
+                Log.d("AlarmScheduler", "✅ Alarm ID ${alarm.id} scheduled via fallback setExactAndAllowWhileIdle")
             } catch (e2: Exception) {
                 Log.e("AlarmScheduler", "❌ All scheduling methods failed for alarm ID ${alarm.id}: ${e2.message}", e2)
                 

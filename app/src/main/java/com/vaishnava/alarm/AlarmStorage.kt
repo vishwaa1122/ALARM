@@ -6,15 +6,18 @@ import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import com.vaishnava.alarm.data.Alarm // Added this import
+import com.google.android.gms.auth.api.signin.GoogleSignIn
 
 class AlarmStorage(context: Context) {
 
     private val sharedPreferences: SharedPreferences
+    private val appContext: Context
 
     init {
         // Use a device-protected storage context for Direct Boot compatibility
         val deviceProtectedContext = context.createDeviceProtectedStorageContext()
         sharedPreferences = deviceProtectedContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        appContext = deviceProtectedContext
     }
 
     fun saveAlarms(alarms: List<Alarm>) {
@@ -24,6 +27,18 @@ class AlarmStorage(context: Context) {
         Log.d("AlarmStorage", "Saved ${alarms.size} alarms to storage")
         for (alarm in alarms) {
             Log.d("AlarmStorage", "Saved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}")
+        }
+
+        // Attempt cloud backup to Google Drive appData if user is signed in
+        try {
+            val account = GoogleSignIn.getLastSignedInAccount(appContext)
+            if (account != null) {
+                CloudAlarmStorage(appContext).saveAlarmsToCloud(alarms) { success ->
+                    Log.d("AlarmStorage", "Cloud backup ${if (success) "succeeded" else "failed"}")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("AlarmStorage", "Cloud backup skipped: ${e.message}")
         }
     }
 

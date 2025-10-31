@@ -1,5 +1,5 @@
 package com.vaishnava.alarm
-
+import com.vaishnava.alarm.CloudBackupControls
 import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -62,6 +62,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -82,11 +83,21 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.google.android.gms.auth.api.signin.GoogleSignInAccount
+import com.google.android.gms.auth.api.signin.GoogleSignInClient
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.tasks.Task
 import com.vaishnava.alarm.data.Alarm
 import com.vaishnava.alarm.ui.theme.AlarmTheme
 import java.util.Calendar
@@ -98,6 +109,9 @@ class MainActivity : ComponentActivity() {
     private val alarmPermissionRequestCode = 1001
     private val batteryOptimizationRequestCode = 1002
     private val scheduleExactAlarmRequestCode = 1003
+    private val RC_SIGN_IN = 9001
+
+    private lateinit var mGoogleSignInClient: GoogleSignInClient
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -110,14 +124,38 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Try to restore again in case sign-in just completed
+        tryRestoreFromCloud()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         alarmStorage = AlarmStorage(this)
         alarmScheduler = AndroidAlarmScheduler(this)
 
+        // Log signing fingerprints in debug builds to help configure Firebase
+        if (BuildConfig.DEBUG) {
+            logSigningFingerprints()
+        }
+
+        // Attempt to restore alarms from Google Drive appData if user is signed in
+        tryRestoreFromCloud()
+
+        // Configure Google Sign In
+        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+            .requestEmail()
+            .build()
+
+        mGoogleSignInClient = GoogleSignIn.getClient(this, gso)
+
         // Request necessary permissions
         requestNecessaryPermissions()
+        // Prompt for exact alarm capability and battery optimization exceptions when applicable
+        promptExactAlarmIfNeeded()
+        promptIgnoreBatteryOptimizationsIfNeeded()
 
         // Start a background task to check for upcoming alarms
         startAlarmNotificationChecker()
@@ -139,7 +177,8 @@ class MainActivity : ComponentActivity() {
                     AlarmScreenContent(
                         alarmStorage = alarmStorage,
                         alarmScheduler = alarmScheduler,
-                        scheduleAlarmCallback = { hour, minute, ringtoneUri, days ->
+                        googleSignInClient = mGoogleSignInClient,
+                        scheduleAlarmCallback = { hour, minute, ringtoneUri, days, missionType, missionPassword ->
                             val alarmId = alarmStorage.getNextAlarmId()
                             Log.d("AlarmApp", "Creating alarm with ID: $alarmId")
                             Log.d("AlarmApp", "Alarm details - Hour: $hour, Minute: $minute, Ringtone: $ringtoneUri, Days: $days")
@@ -153,7 +192,9 @@ class MainActivity : ComponentActivity() {
                                 isEnabled = true,
                                 ringtoneUri = ringtoneUri?.toString(),
                                 days = finalDays,
-                                isProtected = false
+                                isProtected = false,
+                                missionType = missionType,
+                                missionPassword = missionPassword
                             )
                             Log.d("AlarmApp", "Created alarm object with ID: ${alarm.id}")
                             alarmStorage.addAlarm(alarm)
@@ -200,11 +241,6 @@ class MainActivity : ComponentActivity() {
             permissionsToRequest.add(Manifest.permission.RECEIVE_BOOT_COMPLETED)
         }
 
-        // For Android 12+, we need SCHEDULE_EXACT_ALARM permission
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissionsToRequest.add(Manifest.permission.SCHEDULE_EXACT_ALARM)
-        }
-
         // For Android 13+, we need POST_NOTIFICATIONS permission
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -213,6 +249,32 @@ class MainActivity : ComponentActivity() {
         if (permissionsToRequest.isNotEmpty()) {
             requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
         }
+    }
+
+    private fun promptExactAlarmIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            try {
+                val am = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+                if (!am.canScheduleExactAlarms()) {
+                    val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                }
+            } catch (_: Exception) { }
+        }
+    }
+
+    private fun promptIgnoreBatteryOptimizationsIfNeeded() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            }
+        } catch (_: Exception) { }
     }
 
     private fun startAlarmNotificationChecker() {
@@ -524,6 +586,62 @@ class MainActivity : ComponentActivity() {
             // Ignore if receiver was not registered
         }
     }
+
+    private fun tryRestoreFromCloud() {
+        try {
+            val account = com.google.android.gms.auth.api.signin.GoogleSignIn.getLastSignedInAccount(this)
+            if (account == null) return
+            CloudAlarmStorage(this).loadAlarmsFromCloud { alarms ->
+                if (alarms == null) return@loadAlarmsFromCloud
+                if (alarms.isNotEmpty()) {
+                    alarmStorage.saveAlarms(alarms)
+                    runOnUiThread {
+                        android.widget.Toast.makeText(this, "Alarms restored from cloud (${alarms.size})", android.widget.Toast.LENGTH_SHORT).show()
+                        // No activity recreate here; UI will reflect on next open or via manual Restore button which updates list state
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // Ignore restore errors during startup
+        }
+    }
+
+    private fun logSigningFingerprints() {
+        try {
+            val pm = packageManager
+            val pkg = packageName
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                val info = pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+                val current = info.signingInfo?.apkContentsSigners
+                val history = info.signingInfo?.signingCertificateHistory
+                val signatures = current ?: history
+                signatures?.forEach { sig ->
+                    val sha1 = java.security.MessageDigest.getInstance("SHA-1").digest(sig.toByteArray())
+                    val sha256 = java.security.MessageDigest.getInstance("SHA-256").digest(sig.toByteArray())
+                    fun ByteArray.hex() = joinToString(":") { "%02X".format(it) }
+                    Log.i("AppSHA", "SHA-1: ${sha1.hex()}")
+                    Log.i("AppSHA", "SHA-256: ${sha256.hex()}")
+                } ?: run {
+                    Log.w("AppSHA", "No signing signatures available")
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val info = pm.getPackageInfo(pkg, android.content.pm.PackageManager.GET_SIGNATURES)
+                @Suppress("DEPRECATION")
+                info.signatures?.forEach { sig ->
+                    val sha1 = java.security.MessageDigest.getInstance("SHA-1").digest(sig.toByteArray())
+                    val sha256 = java.security.MessageDigest.getInstance("SHA-256").digest(sig.toByteArray())
+                    fun ByteArray.hex() = joinToString(":") { "%02X".format(it) }
+                    Log.i("AppSHA", "SHA-1: ${sha1.hex()}")
+                    Log.i("AppSHA", "SHA-256: ${sha256.hex()}")
+                } ?: run {
+                    Log.w("AppSHA", "No legacy signatures available")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("AppSHA", "Failed to compute fingerprints", e)
+        }
+    }
 }
 
 fun formatDays(days: List<Int>?): String {
@@ -555,7 +673,8 @@ fun formatTime12Hour(hour: Int, minute: Int): String {
 fun AlarmScreenContent(
     alarmStorage: AlarmStorage,
     alarmScheduler: AlarmScheduler,
-    scheduleAlarmCallback: (Int, Int, Uri?, Set<Int>) -> Alarm,
+    googleSignInClient: GoogleSignInClient,
+    scheduleAlarmCallback: (Int, Int, Uri?, Set<Int>, String?, String?) -> Alarm,
     cancelAlarmCallback: (Int) -> Unit
 ) {
     val context = LocalContext.current
@@ -575,6 +694,19 @@ fun AlarmScreenContent(
     LaunchedEffect(Unit) {
         alarms.clear()
         alarms.addAll(alarmStorage.getAlarms())
+    }
+
+    // Reload list when activity resumes (e.g., after granting Drive consent and auto-restore)
+    val listLifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(listLifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                alarms.clear()
+                alarms.addAll(alarmStorage.getAlarms())
+            }
+        }
+        listLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { listLifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     DisposableEffect(Unit) {
@@ -638,6 +770,117 @@ fun AlarmScreenContent(
                     color = Color(0xFF64FFDA),
                     textAlign = TextAlign.Center
                 )
+                
+                Spacer(Modifier.height(12.dp))
+                
+                // Google Sign In Button
+                val accountState = remember { mutableStateOf(com.google.android.gms.auth.api.signin.GoogleSignIn.getLastSignedInAccount(context)) }
+                LaunchedEffect(Unit) {
+                    accountState.value = com.google.android.gms.auth.api.signin.GoogleSignIn.getLastSignedInAccount(context)
+                }
+                val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+                DisposableEffect(lifecycleOwner) {
+                    val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                        if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                            accountState.value = com.google.android.gms.auth.api.signin.GoogleSignIn.getLastSignedInAccount(context)
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                }
+                val currentAccount = accountState.value
+                if (currentAccount == null) {
+                    Button(
+                        onClick = {
+                            try {
+                                val intent = Intent(context, GoogleSignInActivity::class.java)
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                android.widget.Toast.makeText(context, "Unable to open Google Sign-In: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF4285F4),
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth(0.8f)
+                            .height(48.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color.White)
+                            ) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.googleg_standard_color_18),
+                                    contentDescription = "Google Logo",
+                                    tint = Color.Unspecified,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .align(Alignment.Center)
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Sign in with Google",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f),
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    // Show signed-in state with cloud actions
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                        modifier = Modifier.fillMaxWidth(0.9f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "Signed in as ${currentAccount.email ?: currentAccount.displayName}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 14.sp,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                            // Open Cloud Backup page
+                            OutlinedButton(
+                                onClick = {
+                                    try {
+                                        val intent = Intent(context, GoogleSignInActivity::class.java)
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        android.widget.Toast.makeText(context, "Unable to open Cloud Backup: ${e.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            ) { Text("Manage Cloud Backup") }
+
+                            // Cloud actions moved into GoogleSignInActivity
+                            OutlinedButton(
+                                onClick = {
+                                    googleSignInClient.signOut().addOnCompleteListener {
+                                        android.widget.Toast.makeText(context, "Signed out", android.widget.Toast.LENGTH_SHORT).show()
+                                        (context as? android.app.Activity)?.recreate()
+                                    }
+                                }
+                            ) {
+                                Text("Sign out")
+                            }
+                        }
+                    }
+                }
             }
 
             // Alarms header row
@@ -808,8 +1051,8 @@ fun AlarmScreenContent(
             selectedDaysState = selectedDaysState,
             selectedRingtoneUriState = selectedRingtoneUriState,
             onDismissRequest = { showAddDialog.value = false },
-            onConfirm = { hour, minute, ringtoneUri, days ->
-                scheduleAlarmCallback(hour, minute, ringtoneUri, days)
+            onConfirm = { hour, minute, ringtoneUri, days, missionType, missionPassword ->
+                scheduleAlarmCallback(hour, minute, ringtoneUri, days, missionType, missionPassword)
                 showAddDialog.value = false
                 // Refresh the alarms list
                 alarms.clear()
@@ -997,6 +1240,7 @@ fun AlarmItem(
                     )
                 }
             }
+
         }
     }
 }
@@ -1008,7 +1252,7 @@ fun AddAlarmDialog(
     selectedDaysState: MutableState<Set<Int>>,
     selectedRingtoneUriState: MutableState<Uri?>,
     onDismissRequest: () -> Unit,
-    onConfirm: (Int, Int, Uri?, Set<Int>) -> Unit,
+    onConfirm: (Int, Int, Uri?, Set<Int>, String?, String?) -> Unit,
     mediaPlayerState: MutableState<MediaPlayer?>,
     showRingtonePicker: MutableState<Boolean>
 ) {
@@ -1020,6 +1264,8 @@ fun AddAlarmDialog(
     val amPm = remember(timeHour.value) {
         if (timeHour.value >= 12) "PM" else "AM"
     }
+    // Mission state hoisted so all AlertDialog slots can access
+    val missionTypeState = remember { mutableStateOf("none") }
 
     AlertDialog(
         onDismissRequest = onDismissRequest,
@@ -1199,6 +1445,34 @@ fun AddAlarmDialog(
                     }
                 )
 
+                // Mission selection
+                Text(
+                    text = "Mission",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier
+                        .align(Alignment.Start)
+                        .padding(top = 16.dp, bottom = 8.dp)
+                )
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { missionTypeState.value = "none" },
+                        colors = ButtonDefaults.outlinedButtonColors(),
+                        border = BorderStroke(1.dp, if (missionTypeState.value == "none") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+                    ) { Text("None") }
+                    OutlinedButton(
+                        onClick = { missionTypeState.value = "password" },
+                        colors = ButtonDefaults.outlinedButtonColors(),
+                        border = BorderStroke(1.dp, if (missionTypeState.value == "password") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline)
+                    ) { Text("Password") }
+                }
+                // No per-alarm password input; uses globally set password in AlarmActivity
+
                 // Ringtone selection
                 Text(
                     text = "Ringtone",
@@ -1319,7 +1593,9 @@ fun AddAlarmDialog(
                         timeHour.value,
                         timeMinute.value,
                         selectedRingtoneUriState.value,
-                        selectedDaysState.value
+                        selectedDaysState.value,
+                        missionTypeState.value,
+                        null
                     )
                 },
                 enabled = selectedRingtoneUriState.value != null,
@@ -1492,7 +1768,9 @@ fun CustomRingtonePicker(
                 LazyColumn(
                     modifier = Modifier.weight(1f)
                 ) {
-                    items(ringtones) { (name, uri) ->
+                    items(ringtones) { pair ->
+                        val name = pair.first
+                        val uri = pair.second
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
