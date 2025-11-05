@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "476713390854",
+    "project_id": "alarm-app-6e4ff",
+    "storage_bucket": "alarm-app-6e4ff.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:476713390854:android:cde4df846fc374042d4487",
+        "android_client_info": {
+          "package_name": "com.vaishnava.alarm"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBzzoJekwBvcKSRp2vWiT0LINWzr9oXnmQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

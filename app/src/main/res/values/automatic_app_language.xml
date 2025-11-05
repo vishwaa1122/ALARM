@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Descriptive strings for "Automatic App Language" settings -->
+    <string name="automatic_app_language_title">Automatic app language</string>
+    <string name="automatic_app_language_desc">Use the system language for this app when available.</string>
+    <string name="automatic_app_language_on">Automatic (use system language)</string>
+    <string name="automatic_app_language_off">Manual (choose language)</string>
+
+    <!-- Example default language code (change to your needs) -->
+    <string name="automatic_app_language_default_code">system</string>
+
+    <!-- If you need a list of supported languages, use a string-array -->
+    <string-array name="supported_app_languages">
+        <item>system</item>
+        <item>en</item>
+        <item>hi</item>
+        <item>ta</item>
+    </string-array>
+</resources>

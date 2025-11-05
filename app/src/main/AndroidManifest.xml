@@ -1,0 +1,384 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ========================================================== -->
+    <!-- Permissions: Required for alarm scheduling & notifications -->
+    <!-- Note: many of these require user action in Settings or runtime prompts -->
+    <!-- ========================================================== -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Foreground services -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- Exact alarms - REMOVED USE_EXACT_ALARM (causes app to hide from Alarms & Reminders) -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <!-- Power / wake -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    
+    <!-- Full screen intent for lockscreen alarms (Android 14+) -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
+    <!-- Special permissions (must be granted by user via Settings) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+
+    <!-- Android 14+ "Alarms & Reminders" (declare intent to use these capabilities) -->
+    <!-- These are user-controlled switches in Settings → App info → Alarms & reminders -->
+    <uses-permission android:name="android.permission.ALARM_REMINDER_SCHEDULE_EXACT" />
+    <uses-permission android:name="android.permission.ALARM_REMINDER_BYPASS_INTERRUPTION_POLICY" />
+
+    <!-- Allow other apps or system to set alarms via AlarmClock intents -->
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+
+    <!-- Write external storage for forensic logs -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    
+    <!-- Vibration permission for alarm notifications -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    
+    <!-- Media storage permissions for accessing files in shared storage -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    
+    <!-- Legacy storage permission for older Android versions -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+
+    <application
+        android:name=".AlarmApplication"
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Alarm"
+        android:directBootAware="true">
+        
+        <!-- Resolve AD_SERVICES_CONFIG conflict: prefer GMA ad services config -->
+        <property
+            android:name="android.adservices.AD_SERVICES_CONFIG"
+            android:resource="@xml/gma_ad_services_config"
+            tools:replace="android:resource" />
+        <!-- AdMob App ID (required for MobileAdsInitProvider). Replace with your real App ID for production. -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713" />
+        
+        <!-- Metadata to help with app discovery -->
+        <meta-data
+            android:name="android.app.search.global_search"
+            android:value="true" />
+            
+        <!-- Metadata for app category -->
+        <meta-data
+            android:name="android.app.category"
+            android:value="productivity" />
+            
+        <!-- App search metadata -->
+        <meta-data
+            android:name="android.app.searchable"
+            android:resource="@xml/searchable" />
+            
+        <!-- App search suggestions metadata -->
+        <meta-data
+            android:name="android.app.default_searchable"
+            android:value=".MainActivity" />
+                
+        <!-- AlarmReceiver: fired when your alarm triggers -->
+        <receiver
+            android:name=".AlarmReceiver"
+            android:exported="true"
+            android:directBootAware="true"
+            android:enabled="true">
+            <intent-filter android:priority="999">
+                <action android:name="com.vaishnava.alarm.DIRECT_BOOT_ALARM" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.vaishnava.alarm.WAKE_UP" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ForensicAlarmReceiver: handles forensic logging and notifications -->
+        <receiver
+            android:name=".ForensicAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
+
+        <!-- BootReceiver: re-register alarms after reboot / direct boot -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.USER_UNLOCKED" />
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <data android:scheme="package" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Minimal Direct Boot restore receiver: schedules re-ring only (no service/activity starts) -->
+        <receiver
+            android:name=".DirectBootRestoreReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+
+        </receiver>
+
+
+
+        <!-- Accessibility service (optional) -->
+        <service
+            android:name=".MyAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- Foreground alarm service (plays sound / vibration) -->
+        <service
+            android:name=".AlarmForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:directBootAware="true"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Keeper service to anchor process for reliability on aggressive OEMs -->
+        <service
+            android:name=".KeeperService"
+            android:enabled="true"
+            android:exported="false"
+            android:directBootAware="true"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Main alarm service (plays sound / vibration) -->
+        <service
+            android:name=".AlarmService"
+            android:enabled="true"
+            android:exported="false"
+            android:directBootAware="true"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <!-- Receiver to re-post alarm notification when dismissed -->
+        <receiver
+            android:name=".NotificationRepostReceiver"
+            android:enabled="true"
+            android:exported="false"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="com.vaishnava.alarm.NOTIFICATION_DISMISSED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Notification listener (optional) -->
+        <service
+            android:name=".MyNotificationListener"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Activity shown when alarm rings -->
+        <activity
+            android:name=".AlarmActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm"
+            android:theme="@style/Theme.Alarm" />
+
+        <!-- Test activity for Direct Boot features -->
+        <activity
+            android:name=".DirectBootTestActivity"
+            android:exported="true"
+            android:label="Direct Boot Test"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Test activity for Protected Alarm features -->
+        <activity
+            android:name=".TestProtectedAlarmActivity"
+            android:exported="true"
+            android:label="Test Protected Alarm"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Logger test activity -->
+        <activity
+            android:name=".LoggerTestActivity"
+            android:exported="true"
+            android:label="Logger Test"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Test Simple Logger activity -->
+        <activity
+            android:name=".TestSimpleLoggerActivity"
+            android:exported="true"
+            android:label="Test Simple Logger"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Logger Verification activity -->
+        <activity
+            android:name=".LoggerVerificationActivity"
+            android:exported="true"
+            android:label="Logger Verification"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Forensic Logger Test activity -->
+        <activity
+            android:name=".ForensicLoggerTestActivity"
+            android:exported="true"
+            android:label="Forensic Logger Test"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Test 5 AM Alarm activity -->
+        <activity
+            android:name=".TestFiveAMAlarmActivity"
+            android:exported="true"
+            android:label="Test 5 AM Alarm"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Test Alarm activity -->
+        <activity
+            android:name=".TestAlarmActivity"
+            android:exported="true"
+            android:label="Test Alarm"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Diagnostics activity -->
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="true"
+            android:label="Diagnostics"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Debug Logger activity -->
+        <activity
+            android:name=".DebugLoggerActivity"
+            android:exported="true"
+            android:label="Debug Logger"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Minimal Test activity -->
+        <activity
+            android:name=".MinimalTestActivity"
+            android:exported="true"
+            android:label="Minimal Test"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm.test" />
+
+        <!-- Google Sign-In Activity -->
+        <activity
+            android:name=".GoogleSignInActivity"
+            android:exported="true"
+            android:label="Google Sign-In"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm" />
+
+        <!-- Main launcher activity -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.vaishnava.alarm"
+            android:theme="@style/Theme.Alarm">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Alarm provider intent filters -->
+            <!-- These make your app appear in "Alarms & Reminders" settings -->
+            <intent-filter>
+                <action android:name="android.intent.action.SET_ALARM" />
+                <action android:name="android.intent.action.DISMISS_ALARM" />
+                <action android:name="android.intent.action.SNOOZE_ALARM" />
+                <action android:name="android.intent.action.SHOW_ALARMS" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            
+            <!-- Intent filters for app search discovery -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            
+            <!-- Intent filter for alarm-related searches -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:host="alarms" />
+            </intent-filter>
+            
+            <!-- Intent filter for direct app launch -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="app" android:host="chrona" />
+            </intent-filter>
+        </activity>
+
+        <!-- Search receiver for app discovery -->
+        <receiver
+            android:name=".SearchReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </receiver>
+
+        <!-- FileProvider for sharing forensic logs -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+    </application>
+</manifest>
