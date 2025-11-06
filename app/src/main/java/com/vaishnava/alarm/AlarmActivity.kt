@@ -1,7 +1,5 @@
 package com.vaishnava.alarm
 
-import android.util.Log
-
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -432,11 +430,12 @@ class AlarmActivity : ComponentActivity() {
                 try {
                     val storage = AlarmStorage(applicationContext)
                     val alarm = storage.getAlarms().find { it.id == alarmId }
-                    val ringtoneUri = alarm?.ringtoneUri
-                    if (ringtoneUri == null) {
+                    val uriString = alarm?.ringtoneUri
+                    if (uriString.isNullOrBlank()) {
                         "Unknown Ringtone"
                     } else {
-                        val ringtone = RingtoneManager.getRingtone(context, ringtoneUri)
+                        val uri = android.net.Uri.parse(uriString)
+                        val ringtone = RingtoneManager.getRingtone(context, uri)
                         ringtone?.getTitle(context) ?: "Unknown Ringtone"
                     }
                 } catch (_: Exception) {
@@ -591,22 +590,32 @@ class AlarmActivity : ComponentActivity() {
                 ttsRunnable?.let { ttsHandler.removeCallbacks(it) }
                 tts?.stop(); tts?.shutdown()
             } catch (_: Exception) { }
+            
+            // Stop the foreground service
             val serviceIntent = Intent(this@AlarmActivity, AlarmForegroundService::class.java).apply {
                 action = Constants.ACTION_STOP_FOREGROUND_SERVICE
                 putExtra(AlarmReceiver.ALARM_ID, alarmId)
             }
             startService(serviceIntent)
 
+            // Get the alarm and scheduler
             val alarmStorage = AlarmStorage(applicationContext)
+            val alarmScheduler = AndroidAlarmScheduler(applicationContext)
             val alarms = alarmStorage.getAlarms()
-            val alarm = alarms.find { it.id == alarmId }
-
-            if (alarm != null && alarm.days.isNullOrEmpty()) {
+            val alarm = alarms.find { it.id == alarmId } ?: return
+            
+            // For all alarms (both one-time and repeating), cancel the pending alarm
+            alarmScheduler.cancel(alarm)
+            
+            // For one-time alarms, disable them completely
+            // For repeating alarms, keep them enabled but cancel the current instance
+            if (alarm.days.isNullOrEmpty()) {
+                // One-time alarm - disable it completely
                 val updatedAlarm = alarm.copy(isEnabled = false)
                 alarmStorage.updateAlarm(updatedAlarm)
-                val alarmScheduler = AndroidAlarmScheduler(applicationContext)
-                alarmScheduler.cancel(updatedAlarm)
-                // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger call
+            } else {
+                // Repeating alarm - just cancel the current instance, keep it enabled
+                // The alarm will fire again at the next scheduled time
             }
 
             // Clear the upcoming alarm notification
@@ -614,21 +623,6 @@ class AlarmActivity : ComponentActivity() {
                 setPackage(packageName)
             }
             sendBroadcast(clearNotificationIntent)
-
-            // Clear the was_ringing and ring_alarm_id flags in device-protected storage
-            try {
-                val dpsContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    applicationContext.createDeviceProtectedStorageContext() ?: applicationContext
-                } else applicationContext
-                val prefs = dpsContext.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
-                prefs.edit()
-                    .putBoolean("was_ringing", false)
-                    .putInt("ring_alarm_id", -1)
-                    .apply()
-            } catch (e: Exception) {
-                // Log the error if clearing preferences fails
-                Log.e("AlarmActivity", "Error clearing alarm_dps preferences: ${e.message}", e)
-            }
 
             // Bring user back to the app home page after dismiss
             val homeIntent = Intent(this@AlarmActivity, MainActivity::class.java).apply {

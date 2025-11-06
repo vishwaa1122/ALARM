@@ -7,7 +7,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.database.Cursor
-import com.vaishnava.alarm.DirectBootRestoreReceiver
 import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.RingtoneManager
@@ -15,7 +14,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.content.ComponentName
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -44,7 +42,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AlarmAdd
 import androidx.compose.material.icons.filled.AlarmOff
@@ -136,18 +133,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Clear the force_restart_in_progress flag when the app fully starts
-        val dpsContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            createDeviceProtectedStorageContext() ?: this
-        } else this
-        val sharedPrefs = dpsContext.getSharedPreferences(DirectBootRestoreReceiver.PREFS_NAME, Context.MODE_PRIVATE)
-        try {
-            dpsContext.deleteFile(DirectBootRestoreReceiver.FORCE_RESTART_FLAG_FILE)
-            Log.d("AlarmApp", "MainActivity: FORCE_RESTART_FLAG_FILE deleted.")
-        } catch (e: Exception) {
-            Log.e("AlarmApp", "MainActivity: Failed to delete FORCE_RESTART_FLAG_FILE: ${e.message}")
-        }
-
         alarmStorage = AlarmStorage(this)
         alarmScheduler = AndroidAlarmScheduler(this)
 
@@ -171,7 +156,6 @@ class MainActivity : ComponentActivity() {
         // Prompt for exact alarm capability and battery optimization exceptions when applicable
         promptExactAlarmIfNeeded()
         promptIgnoreBatteryOptimizationsIfNeeded()
-        promptAutoStartIfNeeded()
 
         // Start a background task to check for upcoming alarms
         startAlarmNotificationChecker()
@@ -206,7 +190,7 @@ class MainActivity : ComponentActivity() {
                                 hour = hour,
                                 minute = minute,
                                 isEnabled = true,
-                                ringtoneUri = ringtoneUri,
+                                ringtoneUri = ringtoneUri?.toString(),
                                 days = finalDays,
                                 isProtected = false,
                                 missionType = missionType,
@@ -291,77 +275,6 @@ class MainActivity : ComponentActivity() {
                 startActivity(intent)
             }
         } catch (_: Exception) { }
-    }
-
-    private fun promptAutoStartIfNeeded() {
-        // Many OEMs gate auto-start under their own settings. Attempt best-effort intents.
-        try {
-            val prefs = getSharedPreferences("oem_prompts", Context.MODE_PRIVATE)
-            if (prefs.getBoolean("auto_start_prompted_once", false)) {
-                return
-            }
-            val manu = Build.MANUFACTURER.lowercase()
-            val tried = when {
-                manu.contains("xiaomi") -> {
-                    // Redmi 13C (MIUI) often needs SecurityCenter + PowerKeeper pages
-                    tryStart(ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")) ||
-                    tryStart(ComponentName("com.miui.securitycenter", "com.miui.permcenter.permissions.PermissionsEditorActivity")) ||
-                    tryStart(ComponentName("com.miui.powerkeeper", "com.miui.powerkeeper.ui.HiddenAppsConfigActivity")).also { started ->
-                        if (!started) {
-                            // Try explicit Intent with extras for HiddenAppsConfigActivity
-                            val i = Intent().apply {
-                                component = ComponentName("com.miui.powerkeeper", "com.miui.powerkeeper.ui.HiddenAppsConfigActivity")
-                                putExtra("package_name", packageName)
-                                putExtra("package_label", getString(R.string.app_name))
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            tryStartIntent(i)
-                        }
-                    } ||
-                    tryStart(ComponentName("com.miui.powerkeeper", "com.miui.powerkeeper.ui.PowerHideModeActivity")) ||
-                    tryStart(ComponentName("com.miui.securitycenter", "com.miui.appmanager.AppManagerMainActivity")) ||
-                    tryStartIntent(Intent("miui.intent.action.POWER_HIDE_MODE_APP_LIST"))
-                }
-                manu.contains("oppo") -> tryStart(ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"))
-                    || tryStart(ComponentName("com.coloros.safecenter", "com.coloros.safecenter.startupapp.StartupAppListActivity"))
-                manu.contains("vivo") -> tryStart(ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"))
-                    || tryStart(ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"))
-                manu.contains("huawei") -> tryStart(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"))
-                manu.contains("oneplus") -> tryStart(ComponentName("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity"))
-                else -> false
-            }
-            if (!tried) {
-                // Fallback to app details where user can enable autostart/battery settings
-                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.parse("package:$packageName")
-                }
-                startActivity(intent)
-                prefs.edit().putBoolean("auto_start_prompted_once", true).apply()
-                return
-            }
-            // Mark as prompted so we don't nag repeatedly across launches
-            prefs.edit().putBoolean("auto_start_prompted_once", true).apply()
-        } catch (_: Exception) { }
-    }
-
-    private fun tryStart(cn: android.content.ComponentName): Boolean {
-        return try {
-            val intent = Intent().apply {
-                component = cn
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(intent)
-            true
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun tryStartIntent(intent: Intent): Boolean {
-        return try {
-            startActivity(intent)
-            true
-        } catch (_: Exception) { false }
     }
 
     private fun startAlarmNotificationChecker() {
@@ -586,7 +499,7 @@ class MainActivity : ComponentActivity() {
         val existingDefaultAlarm = alarmStorage.getAlarms().firstOrNull {
             it.hour == defaultAlarmHour &&
                     it.minute == defaultAlarmMinute &&
-                    it.ringtoneUri == defaultRingtoneUri &&
+                    it.ringtoneUri == defaultRingtoneUri.toString() &&
                     it.days?.containsAll(defaultDays) == true &&
                     it.isProtected
         }
@@ -598,7 +511,7 @@ class MainActivity : ComponentActivity() {
                 hour = defaultAlarmHour,
                 minute = defaultAlarmMinute,
                 isEnabled = true,
-                ringtoneUri = defaultRingtoneUri,
+                ringtoneUri = defaultRingtoneUri.toString(),
                 days = defaultDays,
                 isHidden = false,
                 isProtected = true
@@ -619,14 +532,15 @@ class MainActivity : ComponentActivity() {
         days: Set<Int>
     ): Alarm {
         val alarmId = alarmStorage.getNextAlarmId()
-        val ringtoneUriString = ringtoneUri?.toString()
+        val ringtoneUriString =
+            ringtoneUri?.toString() ?: Settings.System.DEFAULT_ALARM_ALERT_URI.toString()
 
         val alarm = Alarm(
             id = alarmId,
             hour = hour,
             minute = minute,
             isEnabled = true,
-            ringtoneUri = ringtoneUri ?: Settings.System.DEFAULT_ALARM_ALERT_URI,
+            ringtoneUri = ringtoneUriString,
             days = days.toList(),
             isHidden = false,
             isProtected = false
@@ -768,9 +682,19 @@ fun AlarmScreenContent(
     val showAddDialog = remember { mutableStateOf(false) }
     val showDiagnosticsDialog = remember { mutableStateOf(false) }
 
-    // We'll keep a simple state for hour/minute (same logic preserved)
-    val timeHour = remember { mutableStateOf(7) }
+    // Initialize with default values, will be updated when dialog is shown
+    val timeHour = remember { mutableStateOf(0) }
     val timeMinute = remember { mutableStateOf(0) }
+    
+    // Update time when dialog is shown
+    LaunchedEffect(showAddDialog.value) {
+        if (showAddDialog.value) {
+            val calendar = Calendar.getInstance()
+            calendar.add(Calendar.MINUTE, 1)
+            timeHour.value = calendar.get(Calendar.HOUR_OF_DAY)
+            timeMinute.value = calendar.get(Calendar.MINUTE)
+        }
+    }
 
     val selectedDaysState: MutableState<Set<Int>> = remember { mutableStateOf(setOf<Int>()) }
     val selectedRingtoneUriState: MutableState<Uri?> = remember { mutableStateOf(null) }
@@ -819,7 +743,7 @@ fun AlarmScreenContent(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(16.dp),
+                .padding(horizontal = 0.dp, vertical = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
 
@@ -977,7 +901,7 @@ fun AlarmScreenContent(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    imageVector = Icons.AutoMirrored.Filled.List,
+                    imageVector = Icons.Filled.List,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(20.dp)
@@ -1006,9 +930,7 @@ fun AlarmScreenContent(
 
             // alarms list
             LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
+                modifier = Modifier.fillMaxSize()
             ) {
                 if (alarms.isEmpty()) {
                     item {
@@ -1211,13 +1133,14 @@ fun AlarmItem(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            .padding(vertical = 4.dp, horizontal = 0.dp),  // Remove horizontal padding
+        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+        shape = RoundedCornerShape(0.dp)  // Remove rounded corners for full width
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
@@ -1238,14 +1161,14 @@ fun AlarmItem(
                     try {
                         if (alarm.ringtoneUri != null) {
                             // Handle glassy_bell resource properly
-                            if (alarm.ringtoneUri?.toString()?.contains("glassy_bell") == true) {
+                            if (alarm.ringtoneUri.contains("glassy_bell")) {
                                 "🎵 glassy_bell"
-                            } else if (alarm.ringtoneUri?.toString()?.startsWith("android.resource://") == true) {
+                            } else if (alarm.ringtoneUri.startsWith("android.resource://")) {
                                 // Handle other resource URIs
-                                val uriString = alarm.ringtoneUri?.toString()
-                                if (uriString?.contains("/raw/") == true) {
+                                val uriString = alarm.ringtoneUri
+                                if (uriString.contains("/raw/")) {
                                     // Extract resource name from path format: android.resource://package/raw/resourceName
-                                    val segments = uriString?.split("/") ?: emptyList()
+                                    val segments = uriString.split("/")
                                     if (segments.size > 3) {
                                         "🎵 ${segments[3]}"
                                     } else {
@@ -1253,7 +1176,7 @@ fun AlarmItem(
                                     }
                                 } else {
                                     // Extract resource name from ID format: android.resource://package/resourceId
-                                    val segments = uriString?.split("/") ?: emptyList()
+                                    val segments = uriString.split("/")
                                     if (segments.size > 3) {
                                         try {
                                             val resourceId = segments[3].toInt()
@@ -1272,7 +1195,7 @@ fun AlarmItem(
                                 }
                             } else {
                                 // Handle system ringtones
-                                val uri = Uri.parse(alarm.ringtoneUri?.toString() ?: Settings.System.DEFAULT_ALARM_ALERT_URI.toString())
+                                val uri = Uri.parse(alarm.ringtoneUri)
                                 val ringtone = RingtoneManager.getRingtone(context, uri)
                                 ringtone?.getTitle(context) ?: "Unknown Ringtone"
                             }
@@ -1281,7 +1204,7 @@ fun AlarmItem(
                         }
                     } catch (e: Exception) {
                         // Fallback for any errors
-                        if (alarm.ringtoneUri?.toString()?.contains("glassy_bell") == true) {
+                        if (alarm.ringtoneUri?.contains("glassy_bell") == true) {
                             "🎵 glassy_bell"
                         } else {
                             "🎵 Custom Ringtone"
@@ -1608,14 +1531,14 @@ fun AddAlarmDialog(
                                 } else {
                                     try {
                                         // Handle glassy_bell resource properly
-                                        if (selectedRingtoneUriState.value?.toString()?.contains("glassy_bell") == true) {
+                                        if (selectedRingtoneUriState.value.toString().contains("glassy_bell")) {
                                             "🎵 glassy_bell"
-                                        } else if (selectedRingtoneUriState.value?.toString()?.startsWith("android.resource://") == true) {
+                                        } else if (selectedRingtoneUriState.value.toString().startsWith("android.resource://")) {
                                             // Handle other resource URIs
-                                            val uriString = selectedRingtoneUriState.value?.toString()
-                                            if (uriString?.contains("/raw/") == true) {
+                                            val uriString = selectedRingtoneUriState.value.toString()
+                                            if (uriString.contains("/raw/")) {
                                                 // Extract resource name from path format: android.resource://package/raw/resourceName
-                                                val segments = uriString?.split("/") ?: emptyList()
+                                                val segments = uriString.split("/")
                                                 if (segments.size > 3) {
                                                     "🎵 ${segments[3]}"
                                                 } else {
@@ -1623,7 +1546,7 @@ fun AddAlarmDialog(
                                                 }
                                             } else {
                                                 // Extract resource name from ID format: android.resource://package/resourceId
-                                                val segments = uriString?.split("/") ?: emptyList()
+                                                val segments = uriString.split("/")
                                                 if (segments.size > 3) {
                                                     try {
                                                         val resourceId = segments[3].toInt()
@@ -1642,12 +1565,12 @@ fun AddAlarmDialog(
                                             }
                                         } else {
                                             // Handle system ringtones
-                                            val ringtone = RingtoneManager.getRingtone(context, selectedRingtoneUriState.value ?: Settings.System.DEFAULT_ALARM_ALERT_URI)
+                                            val ringtone = RingtoneManager.getRingtone(context, selectedRingtoneUriState.value)
                                             ringtone?.getTitle(context) ?: "Unknown Ringtone"
                                         }
                                     } catch (e: Exception) {
                                         // Fallback for any errors
-                                        if (selectedRingtoneUriState.value?.toString()?.contains("glassy_bell") == true) {
+                                        if (selectedRingtoneUriState.value.toString().contains("glassy_bell")) {
                                             "🎵 glassy_bell"
                                         } else {
                                             "🎵 Custom Ringtone"

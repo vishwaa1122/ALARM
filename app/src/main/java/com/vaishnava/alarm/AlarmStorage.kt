@@ -3,12 +3,8 @@ package com.vaishnava.alarm
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
-import android.net.Uri
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import com.google.gson.TypeAdapter
-import com.google.gson.stream.JsonReader
-import com.google.gson.stream.JsonWriter
 import com.vaishnava.alarm.data.Alarm // Added this import
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 
@@ -16,25 +12,21 @@ class AlarmStorage(context: Context) {
 
     private val sharedPreferences: SharedPreferences
     private val appContext: Context
-    private val gson: Gson
 
     init {
         // Use a device-protected storage context for Direct Boot compatibility
         val deviceProtectedContext = context.createDeviceProtectedStorageContext()
         sharedPreferences = deviceProtectedContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         appContext = deviceProtectedContext
-        gson = Gson().newBuilder()
-            .registerTypeAdapter(Uri::class.java, UriAdapter())
-            .create()
     }
 
     fun saveAlarms(alarms: List<Alarm>) {
-        val json = gson.toJson(alarms)
+        val json = Gson().toJson(alarms)
         sharedPreferences.edit().putString(KEY_ALARMS, json).apply()
         
         Log.d("AlarmStorage", "Saved ${alarms.size} alarms to storage")
         for (alarm in alarms) {
-            Log.d("AlarmStorage", "Saved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}")
+            Log.d("AlarmStorage", "Saved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}")
         }
 
         // Attempt cloud backup to Google Drive appData if user is signed in
@@ -53,14 +45,14 @@ class AlarmStorage(context: Context) {
     fun getAlarms(): List<Alarm> {
         val json = sharedPreferences.getString(KEY_ALARMS, null)
         val alarms: List<Alarm> = if (json != null) {
-            gson.fromJson(json, object : TypeToken<List<Alarm>>() {}.type)
+            Gson().fromJson(json, object : TypeToken<List<Alarm>>() {}.type)
         } else {
             emptyList()
         }
         
         Log.d("AlarmStorage", "Retrieved ${alarms.size} alarms from storage")
         for (alarm in alarms) {
-            Log.d("AlarmStorage", "Retrieved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}")
+            Log.d("AlarmStorage", "Retrieved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}")
         }
         
         return alarms
@@ -88,7 +80,7 @@ class AlarmStorage(context: Context) {
             }
             saveAlarms(currentAlarms)
             
-            Log.d("AlarmStorage", "Added/Updated alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}")
+            Log.d("AlarmStorage", "Added/Updated alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}")
         }
     }
 
@@ -131,16 +123,5 @@ class AlarmStorage(context: Context) {
     companion object {
         private const val PREF_NAME = "alarm_prefs"
         private const val KEY_ALARMS = "alarms"
-    }
-}
-
-class UriAdapter : TypeAdapter<Uri>() {
-    override fun write(out: JsonWriter, value: Uri?) {
-        out.value(value?.toString())
-    }
-
-    override fun read(input: JsonReader): Uri? {
-        val uriString = input.nextString()
-        return if (uriString.isNullOrEmpty()) null else Uri.parse(uriString)
     }
 }

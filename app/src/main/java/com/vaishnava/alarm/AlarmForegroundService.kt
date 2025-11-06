@@ -86,7 +86,6 @@ class AlarmForegroundService : Service() {
     private var loudnessEnhancer: LoudnessEnhancer? = null
     private var boostActive: Boolean = false
     private var currentGainMb: Int = 0
-    private var dpsWrittenForThisRing: Boolean = false
     private val boostRampRunnable: Runnable = object : Runnable {
         override fun run() {
             if (!boostActive) return
@@ -302,15 +301,17 @@ class AlarmForegroundService : Service() {
 
         // Extract extras
         currentAlarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
-        this.ringtoneUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent?.getParcelableExtra(AlarmReceiver.EXTRA_RINGTONE_URI, Uri::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent?.getParcelableExtra(AlarmReceiver.EXTRA_RINGTONE_URI)
-        }
+        val ringtoneUriString: String? = intent?.getStringExtra(AlarmReceiver.EXTRA_RINGTONE_URI)
+        ringtoneUri = if (ringtoneUriString != null) {
+            if (ringtoneUriString == "test_ringtone") {
+                RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            } else {
+                try { Uri.parse(ringtoneUriString) } catch (_: Exception) {
+                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                }
+            }
+        } else null
         currentRepeatDays = intent?.getIntArrayExtra(AlarmReceiver.EXTRA_REPEAT_DAYS) ?: intArrayOf()
-
-        dpsWrittenForThisRing = false
 
         // Show 1-minute notice when appropriate
         showAlarmNotificationIfNeeded()
@@ -352,19 +353,22 @@ class AlarmForegroundService : Service() {
                         try { tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, "WAKE_MSG_SVC") } catch (_: Exception) { }
                     }
                 }
-            }
-            else {
+            } else {
                 try { tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, "WAKE_MSG_SVC") } catch (_: Exception) { }
             }
         } catch (_: Exception) { }
 
-        // Prepare audio & play
-        startPlayback(this.ringtoneUri ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM))
-
-        // Launch activity once, after playback has started
+        // Launch activity once
         if (launcherScheduled.compareAndSet(false, true)) {
             bgHandler.post(activityLauncher)
         }
+
+        // Choose the actual ringtone
+        val finalRingtoneUri: Uri = ringtoneUri
+            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+
+        // Prepare audio & play
+        startPlayback(finalRingtoneUri)
 
         // Keep service alive
         return START_STICKY
@@ -515,19 +519,6 @@ class AlarmForegroundService : Service() {
                         }
                     }
                     mp.start()
-                    // DPS write: audio actually started playing
-                    if (!dpsWrittenForThisRing) {
-                        try {
-                            val dps = createDeviceProtectedStorageContext()
-                            val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
-                            prefs.edit()
-                                .putBoolean("was_ringing", true)
-                                .putInt("ring_alarm_id", currentAlarmId)
-                                .putLong("ring_started_at", System.currentTimeMillis())
-                                .commit()
-                        } catch (_: Exception) { }
-                        dpsWrittenForThisRing = true
-                    }
                     try {
                         // Prepare loudness enhancer but leave disabled until asked
                         loudnessEnhancer?.release()
@@ -593,19 +584,6 @@ class AlarmForegroundService : Service() {
                 ring.audioAttributes = audioAttributes
                 ring.isLooping = true
                 ring.play()
-                // DPS write for fallback path: audio actually started
-                if (!dpsWrittenForThisRing) {
-                    try {
-                        val dps = createDeviceProtectedStorageContext()
-                        val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
-                        prefs.edit()
-                            .putBoolean("was_ringing", true)
-                            .putInt("ring_alarm_id", currentAlarmId)
-                            .putLong("ring_started_at", System.currentTimeMillis())
-                            .commit()
-                    } catch (_: Exception) { }
-                    dpsWrittenForThisRing = true
-                }
                 ringtoneFallback = ring
             } catch (_: Exception) { }
         }
@@ -649,15 +627,15 @@ class AlarmForegroundService : Service() {
         createNotificationChannel()
         val fullScreen: PendingIntent = createFullScreenIntent()
 
-        return NotificationCompat.Builder(this, "alarm_channel")
+        return Notification.Builder(this, "alarm_channel")
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(android.graphics.Color.parseColor("#1976D2"))
             .setContentTitle("Alarm Active")
             .setContentText("Your alarm is ringing")
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setPriority(Notification.PRIORITY_HIGH)
+            .setCategory(Notification.CATEGORY_ALARM)
             .setFullScreenIntent(fullScreen, true)
             .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(false)
             .build()
     }

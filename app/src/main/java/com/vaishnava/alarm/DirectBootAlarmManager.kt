@@ -170,7 +170,7 @@ object DirectBootAlarmManager {
                             
                             // Parse ringtone URI if available
                             val ringtoneUri = if (parts.size >= 6 && parts[5].isNotEmpty()) {
-                                android.net.Uri.parse(parts[5])
+                                parts[5]
                             } else {
                                 null
                             }

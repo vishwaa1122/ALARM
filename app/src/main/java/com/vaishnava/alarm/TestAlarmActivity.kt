@@ -1,11 +1,7 @@
 package com.vaishnava.alarm
 
-import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
@@ -15,7 +11,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.vaishnava.alarm.data.Alarm
 import com.vaishnava.alarm.ui.theme.AlarmTheme
 import java.util.*
 
@@ -65,13 +60,12 @@ fun TestAlarmScreen() {
                     val alarmStorage = AlarmStorage(deviceProtectedContext)
                     // Create a test alarm with a unique ID for testing
                     val alarmId = alarmStorage.getNextAlarmId()
-                    val ringtoneUri = Uri.parse("content://settings/system/alarm_alert")
-                    val testAlarm = Alarm(
+                    val testAlarm = com.vaishnava.alarm.data.Alarm(
                         id = alarmId,
                         hour = 5,
                         minute = 0,
                         isEnabled = true,
-                        ringtoneUri = ringtoneUri,
+                        ringtoneUri = "test_ringtone",
                         days = listOf(1, 2, 3, 4, 5, 6, 7), // All days
                         alarmTime = System.currentTimeMillis(),
                         isHidden = false
@@ -81,13 +75,12 @@ fun TestAlarmScreen() {
                     alarmStorage.addAlarm(testAlarm)
                     
                     // Add a small delay to ensure the alarm is properly saved before sending the broadcast
-                    Handler(Looper.getMainLooper()).postDelayed({
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                         // Send a broadcast to simulate the alarm
-                        val ringtoneUri = Uri.parse("content://settings/system/alarm_alert")
                         val intent = Intent(context, AlarmReceiver::class.java).apply {
                             action = "com.vaishnava.alarm.DIRECT_BOOT_ALARM"
                             putExtra(AlarmReceiver.ALARM_ID, alarmId) // Test alarm ID
-                            putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri as android.os.Parcelable)
+                            putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, "test_ringtone")
                             putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, intArrayOf(1, 2, 3, 4, 5, 6, 7)) // All days
                         }
                         
@@ -152,9 +145,9 @@ fun TestAlarmScreen() {
                     // Use a proper ringtone URI for the alarm
                     val resourceId = context.resources.getIdentifier("glassy_bell", "raw", context.packageName)
                     val ringtoneUri = if (resourceId != 0) {
-                        Uri.parse("android.resource://${context.packageName}/$resourceId")
+                        "android.resource://${context.packageName}/$resourceId"
                     } else {
-                        Uri.parse("android.resource://${context.packageName}/raw/glassy_bell")
+                        "android.resource://${context.packageName}/raw/glassy_bell"
                     }
                     
                     // Calculate alarm time (1 minute from now)
@@ -201,9 +194,9 @@ fun TestAlarmScreen() {
                     // Use a proper ringtone URI for the alarm
                     val resourceId = context.resources.getIdentifier("glassy_bell", "raw", context.packageName)
                     val ringtoneUri = if (resourceId != 0) {
-                        Uri.parse("android.resource://${context.packageName}/$resourceId")
+                        "android.resource://${context.packageName}/$resourceId"
                     } else {
-                        Uri.parse("android.resource://${context.packageName}/raw/glassy_bell")
+                        "android.resource://${context.packageName}/raw/glassy_bell"
                     }
                     
                     // Calculate alarm time (5 minutes from now)

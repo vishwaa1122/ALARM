@@ -2,7 +2,6 @@ package com.vaishnava.alarm
 
 import android.app.Activity
 import android.content.Context
-import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
@@ -35,12 +34,11 @@ class DirectBootTestActivity : Activity() {
             // Test saving an alarm to Direct Boot storage
             // Use a proper ringtone URI for the test alarm
             val resourceId = resources.getIdentifier("glassy_bell", "raw", packageName)
-            val ringtoneUriString = if (resourceId != 0) {
+            val ringtoneUri = if (resourceId != 0) {
                 "android.resource://$packageName/$resourceId"
             } else {
                 "android.resource://$packageName/raw/glassy_bell"
             }
-            val ringtoneUri = Uri.parse(ringtoneUriString)
             // Use a dynamic alarm ID to prevent duplicate key issues
             val alarmStorage = AlarmStorage(this)
             val alarmId = alarmStorage.getNextAlarmId()

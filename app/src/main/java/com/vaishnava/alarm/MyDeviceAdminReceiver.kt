@@ -17,11 +17,10 @@ class MyDeviceAdminReceiver : DeviceAdminReceiver() {
     override fun onDisabled(context: Context, intent: Intent) {
         super.onDisabled(context, intent)
         Toast.makeText(context, "Device Admin Disabled", Toast.LENGTH_SHORT).show()
-        Log.d("MyDeviceAdminReceiver", "Device Admin Disabled - App may be uninstalled.")
+        Log.d("MyDeviceAdminReceiver", "Device Admin Disabled")
     }
 
     override fun onDisableRequested(context: Context, intent: Intent): CharSequence? {
-        Log.d("MyDeviceAdminReceiver", "Device Admin Disable Requested - App may be uninstalled.")
         // This message will be shown to the user when they try to disable device admin
         return "Are you sure you want to disable device administration? This may allow the app to be uninstalled."
     }

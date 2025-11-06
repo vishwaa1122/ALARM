@@ -52,9 +52,9 @@ class TestProtectedAlarmActivity : Activity() {
         val alarmId = alarmStorage.getNextAlarmId()
         val resourceId = resources.getIdentifier("glassy_bell", "raw", packageName)
         val ringtoneUri = if (resourceId != 0) {
-            android.net.Uri.parse("android.resource://$packageName/$resourceId")
+            "android.resource://$packageName/$resourceId"
         } else {
-            android.net.Uri.parse("android.resource://$packageName/raw/glassy_bell")
+            "android.resource://$packageName/raw/glassy_bell"
         }
         
         val testAlarm = Alarm(

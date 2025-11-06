@@ -54,17 +54,6 @@ class AlarmReceiver : BroadcastReceiver() {
                 }
                 try {
                     context.startActivity(activityIntent)
-                    // Additionally start the foreground service to ensure audio
-                    try {
-                        val svc = Intent(context, AlarmForegroundService::class.java).apply {
-                            putExtra(ALARM_ID, alarmId)
-                        }
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                            context.startForegroundService(svc)
-                        } else {
-                            context.startService(svc)
-                        }
-                    } catch (_: Exception) { }
                 } catch (e: Exception) {
                     // If we can't start the activity, at least make a noise
                     try {
@@ -86,13 +75,7 @@ class AlarmReceiver : BroadcastReceiver() {
                     } catch (e2: Exception) {
                         // If we can't play a ringtone, at least vibrate
                         try {
-                            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                                val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as android.os.VibratorManager
-                                vibratorManager.defaultVibrator
-                            } else {
-                                @Suppress("DEPRECATION")
-                                context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-                            }
+                            val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                 vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 500), 0))
                             } else {
@@ -129,9 +112,7 @@ class AlarmReceiver : BroadcastReceiver() {
             }
             
             val alarmId = intent.getIntExtra(ALARM_ID, -1)
-            val alarmStorage = AlarmStorage(context)
-            val alarm = alarmStorage.getAlarms().find { it.id == alarmId }
-            val ringtoneUri = alarm?.ringtoneUri
+            val ringtoneUri = intent.getStringExtra(EXTRA_RINGTONE_URI)
             // Fix: Handle null repeatDays correctly
             val repeatDays = intent.getIntArrayExtra(EXTRA_REPEAT_DAYS) ?: intArrayOf()
 
@@ -139,37 +120,24 @@ class AlarmReceiver : BroadcastReceiver() {
 
             // All alarms are handled consistently
             if (alarmId != -1) {
-                // Save wasRinging and ring_alarm_id to device-protected storage
                 try {
-                    val dpsContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        context.createDeviceProtectedStorageContext() ?: context
-                    } else context
-                    val prefs = dpsContext.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
-                    prefs.edit()
-                        .putBoolean("was_ringing", true)
-                        .putInt("ring_alarm_id", alarmId)
-                        .apply()
-                } catch (e: Exception) {
-                    // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.e call
-                }
-                try {
-                    val storage = AlarmStorage(context)
-                    val foundAlarm = storage.getAlarms().find { it.id == alarmId }
-                    if (foundAlarm != null) {
+                    val alarmStorage = AlarmStorage(context)
+                    val alarm = alarmStorage.getAlarms().find { it.id == alarmId }
+                    if (alarm != null) {
                         // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.d calls
                         
                         // Always reschedule repeating alarms (including daily 5 AM alarms)
                         // Cancel one-time alarms after firing
-                        if (foundAlarm.days.isNullOrEmpty()) {
+                        if (alarm.days.isNullOrEmpty()) {
                             // For one-time alarms, cancel after firing
                             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.d call
                             val scheduler = AndroidAlarmScheduler(context)
-                            scheduler.cancel(foundAlarm)
+                            scheduler.cancel(alarm)
                         } else {
                             // For repeating alarms (including 5 AM daily alarms), always reschedule
                             // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.d call
                             val scheduler = AndroidAlarmScheduler(context)
-                            scheduler.schedule(foundAlarm)
+                            scheduler.schedule(alarm)
                         }
                     } else {
                         // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.e call
@@ -183,7 +151,7 @@ class AlarmReceiver : BroadcastReceiver() {
                 // PATCHED_BY_AUTOFIXER: Removed UnifiedLogger.d call
                 val serviceIntent = Intent(context, AlarmForegroundService::class.java).apply {
                     putExtra(ALARM_ID, alarmId)
-                    putExtra(EXTRA_RINGTONE_URI, ringtoneUri as android.os.Parcelable?)
+                    putExtra(EXTRA_RINGTONE_URI, ringtoneUri)
                     putExtra(EXTRA_REPEAT_DAYS, repeatDays)
 
                 }
@@ -214,7 +182,7 @@ class AlarmReceiver : BroadcastReceiver() {
                             val activityIntent = Intent(context, AlarmActivity::class.java).apply {
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                                 putExtra(ALARM_ID, alarmId)
-                                putExtra(EXTRA_RINGTONE_URI, ringtoneUri as android.os.Parcelable?)
+                                putExtra(EXTRA_RINGTONE_URI, ringtoneUri)
                                 putExtra(EXTRA_REPEAT_DAYS, repeatDays)
                             }
                             context.startActivity(activityIntent)
