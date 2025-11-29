@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">CHRONA</string>
+    <string name="accessibility_service_description">This service helps to ensure the alarm is visible and actionable, especially on the lock screen.</string>
+    <string name="service_name">My Accessibility Service</string>
+    <string name="search_description">Chrona Alarm App - Precision Time Management. Search for alarms, chrona, clock, timer, or reminder to find this app.</string>
+    
+    <!-- Search keywords -->
+    <string name="search_keyword_alarm">alarm</string>
+    <string name="search_keyword_chrona">chrona</string>
+    <string name="search_keyword_clock">clock</string>
+    <string name="search_keyword_timer">timer</string>
+    <string name="search_keyword_reminder">reminder</string>
+    
+    <!-- TEMP: Fallback for Google Sign-In until google-services plugin generates this from google-services.json -->
+    <string name="default_web_client_id">REPLACE_WITH_WEB_CLIENT_ID</string>
+
+    <!-- Google Cloud OAuth Web Client ID (provided by user) -->
+    <string name="google_web_client_id">16099075312-hliitq9ghhsaj5ggprbhok9nsca7f3a0.apps.googleusercontent.com</string>
+</resources>
