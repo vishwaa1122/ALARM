@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import com.vaishnava.alarm.data.Alarm
 import com.vaishnava.alarm.Constants
@@ -40,12 +41,52 @@ class AlarmReceiver : BroadcastReceiver() {
     private val bg = Executors.newSingleThreadExecutor()
 
     override fun onReceive(context: Context, intent: Intent?) {
+        val TAG = "AlarmReceiver"
+        val action = intent?.action ?: return
+        
+        // CRITICAL FIX: Global prevention of missed alarm processing during normal alarm firing
+        if (action == "com.vaishnava.alarm.DIRECT_BOOT_ALARM" || action == "com.vaishnava.alarm.ALARM_FIRE") {
+            try {
+                val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    context.createDeviceProtectedStorageContext()
+                } else {
+                    context
+                }
+                val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putBoolean("normal_alarm_firing", true)
+                    .putLong("normal_alarm_start_time", System.currentTimeMillis())
+                    .apply()
+                Log.d(TAG, "Set normal_alarm_firing=true for dual audio prevention")
+            } catch (_: Exception) { }
+        }
+        
+        // CRITICAL FIX: Block missed alarm processing if normal alarm is currently firing
+        if (action == "com.vaishnava.alarm.MISSED_ALARM_IMMEDIATE" || action.contains("missed")) {
+            try {
+                val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    context.createDeviceProtectedStorageContext()
+                } else {
+                    context
+                }
+                val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                val normalAlarmFiring = prefs.getBoolean("normal_alarm_firing", false)
+                val normalAlarmStartTime = prefs.getLong("normal_alarm_start_time", 0L)
+                val now = System.currentTimeMillis()
+                val secondsSinceNormalAlarm = (now - normalAlarmStartTime) / 1000
+                
+                if (normalAlarmFiring && secondsSinceNormalAlarm <= 10) {
+                    Log.d(TAG, " BLOCKING MISSED ALARM: Normal alarm fired $secondsSinceNormalAlarm seconds ago, preventing missed alarm dual audio")
+                    return
+                }
+            } catch (_: Exception) { }
+        }
+
         if (intent == null) {
             Log.w(TAG, "onReceive: null intent")
             return
         }
 
-        val action = intent.action ?: ""
         // Forensic logging of inbound intent
         try {
             val extrasKeys = intent.extras?.keySet()?.joinToString()
@@ -75,6 +116,17 @@ class AlarmReceiver : BroadcastReceiver() {
                     context.sendBroadcast(repostIntent)
                 }
                 return
+            }
+            "com.vaishnava.alarm.MISSED_ALARM_IMMEDIATE" -> {
+                Log.d(TAG, "Processing missed alarm immediate trigger for alarm $alarmId")
+                val skipAudio = intent.getBooleanExtra("skip_audio", false)
+                if (skipAudio) {
+                    Log.d(TAG, "Skipping audio for missed alarm $alarmId (handled by service) - returning early")
+                    // Don't start service again, just handle UI/logic - COMPLETELY SKIP processing
+                    return
+                } else {
+                    // Continue with normal alarm processing - this will be handled as regular alarm
+                }
             }
         }
 
@@ -235,18 +287,24 @@ class AlarmReceiver : BroadcastReceiver() {
 
         // 1) Start foreground service to manage alarm lifecycle
         try {
-            val svc = Intent(context, AlarmForegroundService::class.java).apply {
-                putExtra(ALARM_ID, alarm.id)
-                putExtra(EXTRA_RINGTONE_URI, alarm.ringtoneUri)
-                putExtra(EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
-                if (isWakeUpFollowUp) {
-                    putExtra("from_wake_check", true)
+            // Check if we should skip audio (for missed alarms that already have service running)
+            val skipAudio = intent.getBooleanExtra("skip_audio", false)
+            if (skipAudio) {
+                Log.d(TAG, "Skipping AlarmForegroundService start for alarm ${alarm.id} (audio already handled)")
+            } else {
+                val svc = Intent(context, AlarmForegroundService::class.java).apply {
+                    putExtra(ALARM_ID, alarm.id)
+                    putExtra(EXTRA_RINGTONE_URI, alarm.ringtoneUri)
+                    putExtra(EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
+                    if (isWakeUpFollowUp) {
+                        putExtra("from_wake_check", true)
+                    }
                 }
-            }
-            try {
-                context.startForegroundService(svc)
-            } catch (e: Exception) {
-                context.startService(svc)
+                try {
+                    context.startForegroundService(svc)
+                } catch (e: Exception) {
+                    context.startService(svc)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start AlarmForegroundService: ${e.message}", e)

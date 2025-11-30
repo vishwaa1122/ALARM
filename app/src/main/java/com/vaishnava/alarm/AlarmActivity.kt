@@ -141,7 +141,7 @@ class AlarmActivity : ComponentActivity() {
     private var tts: android.speech.tts.TextToSpeech? = null
     private var ttsMessage: String = ""
     private val ttsHandler = Handler(Looper.getMainLooper())
-    private var ttsRunnable: Runnable? = null
+    // DISABLED: ttsRunnable removed - legacy TTS repeater causing continuous repetition
     private var lastSpokenTime: String = ""
 
     private val writeSettingsState = mutableStateOf(false)
@@ -157,57 +157,10 @@ class AlarmActivity : ComponentActivity() {
     }
 
     private fun startTtsRepeater() {
-        val r = object : Runnable {
-            override fun run() {
-                try {
-                    // Check if silence_no_sound is selected before speaking
-                    val isSilenceRingtone = try {
-                        val storage = AlarmStorage(applicationContext)
-                        val alarm = storage.getAlarms().find { it.id == alarmId }
-                        val ringtoneUri = alarm?.ringtoneUri?.toString()
-                        Log.d(TAG, "TTS_REPEATER_CHECK: alarmId=$alarmId ringtoneUri=$ringtoneUri")
-                        val containsSilence = ringtoneUri?.contains("silence_no_sound") == true
-                        Log.d(TAG, "TTS_REPEATER_CHECK: containsSilence=$containsSilence")
-
-                        // Write to persistent log file
-                        writePersistentLog("TTS_REPEATER_CHECK: alarmId=$alarmId ringtoneUri=$ringtoneUri containsSilence=$containsSilence")
-
-                        // Add to app's sequencer log system
-                        MainActivity.getInstance()?.addSequencerLog("TTS_REPEATER_CHECK: alarmId=$alarmId ringtoneUri=$ringtoneUri containsSilence=$containsSilence")
-
-                        containsSilence
-                    } catch (_: Exception) {
-                        Log.d(TAG, "TTS_REPEATER_CHECK: Exception checking ringtone")
-                        writePersistentLog("TTS_REPEATER_CHECK: Exception checking ringtone for alarmId=$alarmId")
-                        MainActivity.getInstance()?.addSequencerLog("TTS_REPEATER_CHECK: Exception checking ringtone for alarmId=$alarmId")
-                        false
-                    }
-
-                    if (!isSilenceRingtone) {
-                        val nowStr: String = try {
-                            val fmt = java.text.SimpleDateFormat("h:mm a", java.util.Locale.US)
-                            val time = fmt.format(java.util.Date())
-                            val (hour, minute) = time.split(":").map { it.toInt() }
-                            val period = if (hour < 12) "AM" else "PM"
-                            val displayHour = if (hour == 0) 12 else if (hour > 12) hour - 12 else hour
-                            val minuteStr = if (minute < 10) "zero $minute" else minute.toString()
-                            "$displayHour $minuteStr $period"
-                        } catch (_: Exception) { "now" }
-                        if (nowStr != lastSpokenTime) {
-                            lastSpokenTime = nowStr
-                            sendDuckForTts()
-                            val repeatMsg = "The time is $nowStr. It is time to wake up now."
-                            tts?.speak(repeatMsg, android.speech.tts.TextToSpeech.QUEUE_ADD, null, "WAKE_MSG_REPEAT")
-                        }
-                    } else {
-                        Log.d(TAG, "Silence ringtone detected - TTS repeater disabled")
-                    }
-                } catch (_: Exception) {}
-                ttsHandler.postDelayed(this, 5000)
-            }
-        }
-        ttsRunnable = r
-        ttsHandler.postDelayed(r, 5000)
+        // DISABLED: Legacy TTS repeater causing continuous repetition
+        // This independent timer conflicted with the forensic TTS system in AlarmForegroundService
+        // TTS is now handled exclusively by the service with proper completion guards
+        Log.d(TAG, "Legacy TTS repeater disabled - using service-based forensic TTS system")
     }
 
     private fun exitPreview() {
@@ -220,8 +173,9 @@ class AlarmActivity : ComponentActivity() {
                 val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
                 prefs.edit().putLong("preview_exit_block_$alarmId", System.currentTimeMillis()).apply()
             }
-            try { ttsRunnable?.let { ttsHandler.removeCallbacks(it) }; ttsRunnable = null } catch (_: Exception) {}
+            // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed
             try { tts?.stop(); tts?.shutdown(); tts = null } catch (_: Exception) {}
+            try { ttsHandler.removeCallbacksAndMessages(null) } catch (_: Exception) {}
             try {
                 val svc = Intent(this@AlarmActivity, AlarmForegroundService::class.java).apply {
                     action = Constants.ACTION_STOP_FOREGROUND_SERVICE
@@ -392,10 +346,8 @@ class AlarmActivity : ComponentActivity() {
             cancelWakeCheckFollowUp(this, alarmId)
 
             // Stop TTS immediately
-            ttsRunnable?.let {
-                ttsHandler.removeCallbacks(it)
-                ttsRunnable = null
-            }
+            // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed
+            try { ttsHandler.removeCallbacksAndMessages(null) } catch (_: Exception) {}
             try {
                 tts?.apply {
                     stop()
@@ -610,8 +562,22 @@ class AlarmActivity : ComponentActivity() {
                     val displayHour = if (hour == 0) 12 else if (hour > 12) hour - 12 else hour
                     val minuteStr = if (minute < 10) "zero $minute" else minute.toString()
                     "$displayHour $minuteStr $period"
-                } catch (_: Exception) { "now" }
-                ttsMessage = "The time is $nowStr. It is time to wake up now."
+                } catch (_: Exception) { 
+                    // Always try to get time, even if exception occurs
+                    try {
+                        val cal = java.util.Calendar.getInstance()
+                        val hour = cal.get(java.util.Calendar.HOUR)
+                        val minute = cal.get(java.util.Calendar.MINUTE)
+                        val ampm = if (cal.get(java.util.Calendar.AM_PM) == java.util.Calendar.AM) "AM" else "PM"
+                        val displayHour = if (hour == 0) 12 else hour
+                        val minuteStr = if (minute < 10) "zero $minute" else minute.toString()
+                        "$displayHour $minuteStr $ampm"
+                    } catch (_: Exception) { 
+                        // Final fallback - use system time directly
+                        java.text.SimpleDateFormat("h:mm a").format(java.util.Date())
+                    }
+                }
+                ttsMessage = "The time is $nowStr. Time to wake up."
 
                 // Check if silence_no_sound is selected - if so, don't use TTS
                 val isSilenceRingtone = try {
@@ -665,7 +631,8 @@ class AlarmActivity : ComponentActivity() {
                             } catch (_: Exception) {}
                             tts?.speak(ttsMessage, android.speech.tts.TextToSpeech.QUEUE_ADD, null, "WAKE_MSG")
                             lastSpokenTime = nowStr
-                            startTtsRepeater()
+                            // DISABLED: Legacy TTS repeater removed - service handles periodic TTS
+                            Log.d(TAG, "Initial TTS spoken - periodic TTS handled by service")
                         }
                     }
                 } else {
@@ -1638,10 +1605,8 @@ class AlarmActivity : ComponentActivity() {
             activityDismissed = true
             missionTapEnabled = false
             try { this@AlarmActivity.runOnUiThread { } } catch (_: Exception) {}
-            ttsRunnable?.let {
-                ttsHandler.removeCallbacks(it)
-                ttsRunnable = null
-            }
+            // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed
+            try { ttsHandler.removeCallbacksAndMessages(null) } catch (_: Exception) {}
             try {
                 tts?.apply {
                     stop()
@@ -1738,10 +1703,8 @@ class AlarmActivity : ComponentActivity() {
                 activityDismissed = true
                 missionTapEnabled = false
                 try { this@AlarmActivity.runOnUiThread { } } catch (_: Exception) {}
-                ttsRunnable?.let {
-                    ttsHandler.removeCallbacks(it)
-                    ttsRunnable = null
-                }
+                // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed
+                try { ttsHandler.removeCallbacksAndMessages(null) } catch (_: Exception) {}
                 try {
                     tts?.apply {
                         stop()
@@ -1839,10 +1802,8 @@ class AlarmActivity : ComponentActivity() {
             }
 
             // Stop TTS
-            ttsRunnable?.let {
-                ttsHandler.removeCallbacks(it)
-                ttsRunnable = null
-            }
+            // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed
+            try { ttsHandler.removeCallbacksAndMessages(null) } catch (_: Exception) {}
             try {
                 tts?.apply {
                     stop()
@@ -2048,8 +2009,8 @@ class AlarmActivity : ComponentActivity() {
             // Error unregistering receiver
         }
         try {
-            ttsRunnable?.let { ttsHandler.removeCallbacks(it) }
-            ttsRunnable = null
+            // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed
+            try { ttsHandler.removeCallbacksAndMessages(null) } catch (_: Exception) {}
             tts?.apply { stop(); shutdown() }
             tts = null
         } catch (e: Exception) {

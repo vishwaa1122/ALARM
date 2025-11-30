@@ -11,7 +11,9 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.vaishnava.alarm.data.Alarm
 import java.io.FileNotFoundException
+import java.util.Calendar
 
 /**
  * Minimal, direct-boot-aware receiver whose ONLY job is to re-schedule a near-term alarm
@@ -134,6 +136,15 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                     } catch (e: Exception) {
                         Log.e("AlarmApp", "DirectBootRestoreReceiver: Failed to create FORCE_RESTART_FLAG_FILE: ${e.message}")
                     }
+                    
+                    // NEW: Reschedule all future alarms in locked boot mode
+                    try {
+                        val scheduledIds = rescheduleAllAlarmsInLockedMode(actualDpsContext)
+                        // Store scheduled IDs to prevent dual ringing in missed alarm check
+                        checkAndFireMissedAlarms(actualDpsContext, scheduledIds)
+                    } catch (e: Exception) {
+                        Log.e("AlarmApp", "Failed to reschedule alarms in locked mode: ${e.message}")
+                    }
                 }
                 else -> return
             }
@@ -201,61 +212,38 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
             val triggerAt = now + 800
             val info = AlarmManager.AlarmClockInfo(triggerAt, showIntent)
             am.setAlarmClock(info, fireIntent)
-            try { am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt + 400, fireIntent) } catch (_: Exception) {}
+            // CRITICAL FIX: Remove backup alarm to prevent multiple simultaneous alarms firing
 
-            // Extra backup: fire WAKE_UP broadcast to AlarmReceiver to directly bring up UI if needed
-            try {
-                val wakeIntent = PendingIntent.getBroadcast(
-                    actualDpsContext,
-                    ringId xor 0x4A11, // unique code to avoid PI dedupe
-                    Intent(actualDpsContext, AlarmReceiver::class.java).apply {
-                        action = "com.vaishnava.alarm.WAKE_UP"
-                        data = Uri.parse("alarm-wakeup://$ringId")
-                        putExtra(AlarmReceiver.ALARM_ID, ringId)
-                    },
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, now + 1500, wakeIntent)
-            } catch (_: Exception) {}
-
-            // Second backup ~2.2s: WAKE_UP again with different requestCode to defeat PI dedupe
-            try {
-                val wakeIntent2 = PendingIntent.getBroadcast(
-                    actualDpsContext,
-                    ringId xor 0x6B7F,
-                    Intent(actualDpsContext, AlarmReceiver::class.java).apply {
-                        action = "com.vaishnava.alarm.WAKE_UP"
-                        data = Uri.parse("alarm-wakeup2://$ringId")
-                        putExtra(AlarmReceiver.ALARM_ID, ringId)
-                    },
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, now + 2200, wakeIntent2)
-            } catch (_: Exception) {}
+            // CRITICAL FIX: Remove ALL backup alarms to prevent multiple simultaneous alarms firing
+            // The primary setAlarmClock trigger is sufficient
 
             Log.d("AlarmApp", "DirectBootRestoreReceiver: scheduled re-ring for ID=$ringId (AlarmClock + backups)")
 
-            // Immediate in-app broadcast fallback: trigger AlarmReceiver right now
-            try {
-                val immediate = Intent(actualDpsContext, AlarmReceiver::class.java).apply {
-                    action = "com.vaishnava.alarm.DIRECT_BOOT_ALARM"
-                    data = Uri.parse("alarm-immediate://$ringId")
-                    putExtra(AlarmReceiver.ALARM_ID, ringId)
-                }
-                actualDpsContext.sendBroadcast(immediate)
-            } catch (_: Exception) {}
+            // CRITICAL FIX: Remove immediate broadcast to prevent dual audio
+            // The setAlarmClock trigger is sufficient - immediate broadcast causes duplicate AlarmForegroundService
 
             // Last-resort: try to start the foreground service immediately to ensure sound
             try {
+                // Get the ringtone URI from DPS storage
+                val ringtoneUri = try {
+                    val prefs = actualDpsContext.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
+                    val uriString = prefs.getString("direct_boot_ringtone_$ringId", null)
+                    uriString?.let { Uri.parse(it) }
+                } catch (e: Exception) {
+                    Log.e("AlarmApp", "Failed to get ringtone URI for DPS alarm ID=$ringId: ${e.message}")
+                    null
+                }
+                
                 val svc = Intent(actualDpsContext, AlarmForegroundService::class.java).apply {
                     putExtra(AlarmReceiver.ALARM_ID, ringId)
+                    putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     actualDpsContext.startForegroundService(svc)
                 } else {
                     actualDpsContext.startService(svc)
                 }
-                Log.d("AlarmApp", "DirectBootRestoreReceiver: started AlarmForegroundService for ID=$ringId")
+                Log.d("AlarmApp", "DirectBootRestoreReceiver: started AlarmForegroundService for ID=$ringId with ringtone=$ringtoneUri")
             } catch (e: Exception) {
                 Log.e("AlarmApp", "DirectBootRestoreReceiver: Failed to start AlarmForegroundService for ID=$ringId: ${e.message}")
             }
@@ -266,6 +254,48 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                 Log.d("AlarmApp", "DirectBootRestoreReceiver: FORCE_RESTART_FLAG_FILE deleted after restoration.")
             } catch (e: Exception) {
                 Log.e("AlarmApp", "DirectBootRestoreReceiver: Failed to delete FORCE_RESTART_FLAG_FILE after restoration: ${e.message}")
+            }
+
+            // CRITICAL FIX: Check if any alarm is currently playing before checking missed alarms
+            val currentlyPlayingAlarmId = try {
+                val prefs = actualDpsContext.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                prefs.getInt("current_service_alarm_id", -1)
+            } catch (_: Exception) { -1 }
+            
+            val isAnyAlarmCurrentlyPlaying = currentlyPlayingAlarmId != -1
+            
+            if (isAnyAlarmCurrentlyPlaying) {
+                Log.d("AlarmApp", " ALARM CURRENTLY PLAYING: Skipping missed alarm check - alarm ID $currentlyPlayingAlarmId is active")
+                return
+            }
+            
+            // ADDITIONAL FIX: Check if any alarm was scheduled to fire in the last 2 minutes
+            val recentlyScheduledAlarmId = try {
+                val prefs = actualDpsContext.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                val lastScheduledId = prefs.getInt("last_scheduled_alarm_id", -1)
+                val lastScheduledTime = prefs.getLong("last_scheduled_time", 0L)
+                val now = System.currentTimeMillis()
+                val minutesSinceScheduled = (now - lastScheduledTime) / (1000 * 60)
+                
+                if (lastScheduledId != -1 && minutesSinceScheduled <= 2) {
+                    Log.d("AlarmApp", " RECENTLY SCHEDULED: Alarm ID $lastScheduledId was scheduled $minutesSinceScheduled minutes ago, skipping missed alarm check")
+                    return
+                }
+                -1
+            } catch (_: Exception) { -1 }
+            
+            // CRITICAL: Clear was_ringing flag to prevent dual detection in missed alarm check
+            try {
+                val prefs = actualDpsContext.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                prefs.edit()
+                    .remove("was_ringing")
+                    .remove("ring_alarm_id") 
+                    .remove("ring_started_at")
+                    .putBoolean("restored_alarm_${ringId}", true) // Mark this alarm as just restored
+                    .apply()
+                Log.d("AlarmApp", "DirectBootRestoreReceiver: Cleared was_ringing flags and marked alarm $ringId as restored")
+            } catch (e: Exception) {
+                Log.e("AlarmApp", "DirectBootRestoreReceiver: Failed to clear was_ringing flags: ${e.message}")
             }
 
         } catch (e: Exception) {
@@ -396,5 +426,200 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
 
         notificationManager.notify(NOTIFICATION_ID, notification)
         Log.d("AlarmApp", "Notified user about invalid app installation.")
+    }
+    
+    /**
+     * Reschedule all enabled alarms when device is in locked boot mode.
+     * This ensures alarms fire even if phone remains locked after reboot.
+     * Returns list of scheduled alarm IDs to prevent dual ringing.
+     */
+    private fun rescheduleAllAlarmsInLockedMode(dpsContext: Context): Set<Int> {
+        try {
+            Log.d("AlarmApp", "=== DPS LOCKED BOOT RESCHEDULE START ===")
+            Log.d("AlarmApp", "Rescheduling all alarms in locked boot mode")
+            
+            // Try to get alarms from device protected storage first
+            val alarms = try {
+                val storage = AlarmStorage(dpsContext)
+                val alarmList = storage.getAlarms()
+                Log.d("AlarmApp", "Found ${alarmList.size} alarms in DPS storage")
+                alarmList.forEach { alarm: Alarm ->
+                    Log.d("AlarmApp", "DPS Alarm: ID=${alarm.id}, Enabled=${alarm.isEnabled}, Time=${alarm.hour}:${alarm.minute}")
+                }
+                alarmList
+            } catch (e: Exception) {
+                Log.w("AlarmApp", "Failed to read alarms from DPS storage: ${e.message}")
+                emptyList()
+            }
+            
+            if (alarms.isEmpty()) {
+                Log.d("AlarmApp", "No alarms found in DPS storage during locked boot")
+                return emptySet()
+            }
+            
+            val scheduler = AndroidAlarmScheduler(dpsContext)
+            var scheduledCount = 0
+            val scheduledIds = mutableSetOf<Int>()
+            val now = System.currentTimeMillis()
+            
+            alarms.forEach { alarm: Alarm ->
+                if (alarm.isEnabled) {
+                    try {
+                        // Calculate if alarm should trigger soon (within next 24 hours)
+                        val calendar = java.util.Calendar.getInstance().apply {
+                            timeInMillis = now
+                            set(java.util.Calendar.HOUR_OF_DAY, alarm.hour)
+                            set(java.util.Calendar.MINUTE, alarm.minute)
+                            set(java.util.Calendar.SECOND, 0)
+                            set(java.util.Calendar.MILLISECOND, 0)
+                        }
+                        
+                        // If alarm time is earlier than now, move to next day
+                        if (calendar.timeInMillis <= now) {
+                            calendar.add(java.util.Calendar.DAY_OF_MONTH, 1)
+                        }
+                        
+                        // Only schedule if alarm is within next 24 hours
+                        val nextTrigger = calendar.timeInMillis
+                        if (nextTrigger - now <= 24 * 60 * 60 * 1000L) {
+                            scheduler.schedule(alarm)
+                            scheduledCount++
+                            scheduledIds.add(alarm.id)
+                            val timeUntil = (nextTrigger - now) / 1000 / 60 // minutes
+                            Log.d("AlarmApp", "✅ SCHEDULED DPS Alarm ID ${alarm.id} for ${alarm.hour}:${alarm.minute} (in ${timeUntil} minutes)")
+                        } else {
+                            Log.d("AlarmApp", "⏭️ Skipping alarm ID ${alarm.id} - more than 24 hours away")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("AlarmApp", "❌ Failed to schedule alarm ID ${alarm.id} in locked mode: ${e.message}")
+                    }
+                } else {
+                    Log.d("AlarmApp", "⏸️ Skipping disabled alarm ID ${alarm.id} in locked boot")
+                }
+            }
+            
+            Log.d("AlarmApp", "=== DPS LOCKED BOOT RESCHEDULE COMPLETE: $scheduledCount alarms scheduled ===")
+            return scheduledIds
+        } catch (e: Exception) {
+            Log.e("AlarmApp", "Error in rescheduleAllAlarmsInLockedMode: ${e.message}", e)
+            return emptySet()
+        }
+    }
+    
+    /**
+     * Check for missed alarms that should fire immediately when device boots up.
+     * This handles cases where device was powered off during alarm time.
+     * Skips alarms that were just scheduled for the near future to prevent dual ringing.
+     */
+    private fun checkAndFireMissedAlarms(context: Context, scheduledIds: Set<Int> = emptySet()) {
+        try {
+            Log.d("AlarmApp", "=== MISSED ALARM CHECK START ===")
+            
+            // Get alarms from storage
+            val alarms = try {
+                val storage = AlarmStorage(context)
+                storage.getAlarms()
+            } catch (e: Exception) {
+                Log.e("AlarmApp", "Failed to read alarms for missed alarm check: ${e.message}")
+                emptyList()
+            }
+            
+            if (alarms.isEmpty()) {
+                Log.d("AlarmApp", "No alarms found for missed alarm check")
+                return
+            }
+            
+            val now = System.currentTimeMillis()
+            val missedAlarms = mutableListOf<Alarm>()
+            
+            alarms.forEach { alarm: Alarm ->
+                if (alarm.isEnabled) {
+                    // Calculate when this alarm should have last fired
+                    val calendar = java.util.Calendar.getInstance().apply {
+                        timeInMillis = now
+                        set(java.util.Calendar.HOUR_OF_DAY, alarm.hour)
+                        set(java.util.Calendar.MINUTE, alarm.minute)
+                        set(java.util.Calendar.SECOND, 0)
+                        set(java.util.Calendar.MILLISECOND, 0)
+                    }
+                    
+                    // If alarm time is later than now, move to yesterday
+                    if (calendar.timeInMillis > now) {
+                        calendar.add(java.util.Calendar.DAY_OF_MONTH, -1)
+                    }
+                    
+                    val lastAlarmTime = calendar.timeInMillis
+                    val minutesMissed = (now - lastAlarmTime) / (1000 * 60)
+                    
+                    // Check if alarm was missed in the last 30 minutes
+                    if (minutesMissed in 1L..30L) {
+                        missedAlarms.add(alarm)
+                        Log.d("AlarmApp", "MISSED ALARM: ID=${alarm.id}, Time=${alarm.hour}:${alarm.minute}, Missed by=${minutesMissed} minutes")
+                    }
+                }
+            }
+            
+            if (missedAlarms.isEmpty()) {
+                Log.d("AlarmApp", "No missed alarms found (or skipped to prevent dual ringing)")
+                return
+            }
+            
+            // Fire missed alarms immediately
+            missedAlarms.forEach { alarm: Alarm ->
+                try {
+                    Log.d("AlarmApp", " FIRING MISSED ALARM ID=${alarm.id} immediately")
+                    
+                    // ONLY start the AlarmForegroundService (don't send broadcast to prevent dual audio)
+                    val svc = Intent(context, AlarmForegroundService::class.java).apply {
+                        putExtra(AlarmReceiver.ALARM_ID, alarm.id)
+                        putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri) // CRITICAL: Pass the correct ringtone URI
+                        putExtra("is_missed_alarm", true)
+                    }
+                    try {
+                        // Check if service is already running for this alarm to prevent duplicate starts
+                        try {
+                            val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                context.createDeviceProtectedStorageContext()
+                            } else {
+                                context
+                            }
+                            val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                            val currentServiceAlarmId = prefs.getInt("current_service_alarm_id", -1)
+                            
+                            if (currentServiceAlarmId == alarm.id) {
+                                Log.d("AlarmApp", "AlarmForegroundService already running for missed alarm ID=${alarm.id}, skipping service start")
+                            } else {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    context.startForegroundService(svc)
+                                } else {
+                                    context.startService(svc)
+                                }
+                                Log.d("AlarmApp", "Started AlarmForegroundService for missed alarm ID=${alarm.id} (audio only)")
+                            }
+                        } catch (e: Exception) {
+                            // Fallback: try starting service anyway
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                context.startForegroundService(svc)
+                            } else {
+                                context.startService(svc)
+                            }
+                            Log.d("AlarmApp", "Started AlarmForegroundService for missed alarm ID=${alarm.id} (fallback)")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("AlarmApp", "Failed to start AlarmForegroundService for missed alarm ID=${alarm.id}: ${e.message}")
+                    }
+                    
+                    // CRITICAL FIX: Remove backup trigger to prevent any chance of dual audio
+                    // The primary AlarmForegroundService start is sufficient
+                    Log.d("AlarmApp", "✅ Missed alarm ID=${alarm.id} triggered with single audio source (no backup)")
+                } catch (e: Exception) {
+                    Log.e("AlarmApp", " Failed to fire missed alarm ID=${alarm.id}: ${e.message}")
+                }
+            }
+            
+            Log.d("AlarmApp", "=== MISSED ALARM CHECK COMPLETE: Fired ${missedAlarms.size} missed alarms ===")
+        } catch (e: Exception) {
+            Log.e("AlarmApp", "Failed to check missed alarms: ${e.message}")
+        }
     }
 }

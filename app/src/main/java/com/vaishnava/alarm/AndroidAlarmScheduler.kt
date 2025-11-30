@@ -83,47 +83,78 @@ class AndroidAlarmScheduler(private val context: Context) : AlarmScheduler {
         appendAlarmLog((if (alarm.days.isNullOrEmpty() && !alarm.repeatDaily) "one-time" else "repeating") + " id=${alarm.id} next=${Date(triggerAtMillis)}")
 
         try {
-            // Show intent for setAlarmClock: open the AlarmActivity when tapped
-            val showActivityIntent = Intent(context, AlarmActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                putExtra(AlarmReceiver.ALARM_ID, alarm.id)
-                putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri)
-                putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
+            // CRITICAL FIX: Use setExactAndAllowWhileIdle instead of setAlarmClock to avoid system default alarm sound
+            // setAlarmClock() can trigger device default alarm sound + our AlarmForegroundService = dual audio
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+                Log.d("AlarmScheduler", "✅ Alarm ID ${alarm.id} scheduled via setExactAndAllowWhileIdle (avoiding system default alarm)")
+                appendAlarmLog("scheduled id=${alarm.id} at=${Date(triggerAtMillis)} via=setExactAndAllowWhileIdle")
+                
+                // CRITICAL: Track recently scheduled alarm to prevent missed alarm dual firing
+                try {
+                    val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        context.createDeviceProtectedStorageContext()
+                    } else {
+                        context
+                    }
+                    val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                    prefs.edit()
+                        .putInt("last_scheduled_alarm_id", alarm.id)
+                        .putLong("last_scheduled_time", System.currentTimeMillis())
+                        .apply()
+                    Log.d("AlarmScheduler", "Tracked scheduled alarm ID ${alarm.id} for missed alarm prevention")
+                } catch (_: Exception) { }
+            } else {
+                alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+                Log.d("AlarmScheduler", "✅ Alarm ID ${alarm.id} scheduled via setExact (avoiding system default alarm)")
+                appendAlarmLog("scheduled id=${alarm.id} at=${Date(triggerAtMillis)} via=setExact")
+                
+                // CRITICAL: Track recently scheduled alarm to prevent missed alarm dual firing
+                try {
+                    val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        context.createDeviceProtectedStorageContext()
+                    } else {
+                        context
+                    }
+                    val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                    prefs.edit()
+                        .putInt("last_scheduled_alarm_id", alarm.id)
+                        .putLong("last_scheduled_time", System.currentTimeMillis())
+                        .apply()
+                    Log.d("AlarmScheduler", "Tracked scheduled alarm ID ${alarm.id} for missed alarm prevention")
+                } catch (_: Exception) { }
             }
-
-            Log.d(
-                "AlarmScheduler",
-                "PI_SHOW: id=${alarm.id} data=${showActivityIntent.data} extrasKeys=${showActivityIntent.extras?.keySet()?.joinToString()}"
-            )
-
-            val showIntent = android.app.PendingIntent.getActivity(
-                context,
-                alarm.id,
-                showActivityIntent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-
-            val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showIntent)
-            alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
-            Log.d("AlarmScheduler", "✅ Alarm ID ${alarm.id} scheduled via setAlarmClock")
-            appendAlarmLog("scheduled id=${alarm.id} at=${Date(triggerAtMillis)} via=setAlarmClock")
         } catch (se: SecurityException) {
             // Explicit handling for exact-alarms permission issues
             Log.e("AlarmScheduler", "❌ SecurityException scheduling alarm ID ${alarm.id}: ${se.message}", se)
             appendAlarmLog("security_exception id=${alarm.id} msg=${se.message}")
         } catch (e: Exception) {
-            Log.e("AlarmScheduler", "❌ Failed to schedule alarm ID ${alarm.id} via setAlarmClock: ${e.message}", e)
+            Log.e("AlarmScheduler", "❌ Failed to schedule alarm ID ${alarm.id} via setExact: ${e.message}", e)
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
-                } else {
-                    alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMillis, pendingIntent)
+                // Final fallback - try setAlarmClock if exact methods fail
+                val showActivityIntent = Intent(context, AlarmActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    putExtra(AlarmReceiver.ALARM_ID, alarm.id)
+                    putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri)
+                    putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
                 }
-                Log.d("AlarmScheduler", "✅ Alarm ID ${alarm.id} scheduled via fallback setExactAndAllowWhileIdle/setExact")
-                appendAlarmLog("scheduled id=${alarm.id} at=${Date(triggerAtMillis)} via=setExact")
-            } catch (se2: SecurityException) {
-                Log.e("AlarmScheduler", "❌ SecurityException on fallback exact scheduling for alarm ID ${alarm.id}: ${se2.message}", se2)
-                appendAlarmLog("security_exception_fallback id=${alarm.id} msg=${se2.message}")
+
+                Log.d(
+                    "AlarmScheduler",
+                    "PI_SHOW: id=${alarm.id} data=${showActivityIntent.data} extrasKeys=${showActivityIntent.extras?.keySet()?.joinToString()}"
+                )
+
+                val showIntent = android.app.PendingIntent.getActivity(
+                    context,
+                    alarm.id,
+                    showActivityIntent,
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+
+                val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showIntent)
+                alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+                Log.d("AlarmScheduler", "⚠️ Alarm ID ${alarm.id} scheduled via setAlarmClock (fallback - may cause dual audio)")
+                appendAlarmLog("scheduled id=${alarm.id} at=${Date(triggerAtMillis)} via=setAlarmClock(fallback)")
             } catch (e2: Exception) {
                 Log.e("AlarmScheduler", "❌ All scheduling methods failed for alarm ID ${alarm.id}: ${e2.message}", e2)
                 try {

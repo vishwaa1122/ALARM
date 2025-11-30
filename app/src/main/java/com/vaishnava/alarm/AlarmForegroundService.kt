@@ -1,44 +1,30 @@
-@file:Suppress(
-    "NAME_SHADOWING",
-    "UNNECESSARY_SAFE_CALL"
-)
-
 package com.vaishnava.alarm
 
-import com.vaishnava.alarm.data.resolveRingtoneTitle
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.media.AudioAttributes
-import android.media.AudioManager
-import android.media.MediaPlayer
-import android.media.Ringtone
-import android.media.RingtoneManager
+import android.app.*
+import android.content.*
+import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
+import android.media.*
 import android.net.Uri
-import android.os.Build
-import android.os.Handler
-import android.os.HandlerThread
-import android.os.IBinder
-import android.os.PowerManager
-import android.os.VibrationEffect
-import android.os.Vibrator
+import android.os.*
+import android.provider.Settings
+import android.service.notification.StatusBarNotification
 import android.util.Log
+import android.view.View
+import android.view.WindowManager
 import androidx.core.app.NotificationCompat
-import androidx.core.content.getSystemService
+import androidx.core.app.NotificationManagerCompat
+import com.vaishnava.alarm.data.resolveRingtoneTitle
 import com.vaishnava.alarm.data.Alarm
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
+import java.util.*
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.timerTask
 import kotlin.math.ceil
 import com.vaishnava.alarm.sequencer.MissionLogger
 
@@ -50,7 +36,7 @@ class AlarmForegroundService : Service() {
         private const val PREFS_NAME = "alarm_volume_prefs"
         private const val KEY_PREV_VOLUME = "prev_alarm_volume"
         private const val MIN_PERCENT = 50 // Updated to 50% as per memory requirement
-        
+
         private fun writePersistentLog(message: String) {
             try {
                 val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
@@ -79,13 +65,15 @@ class AlarmForegroundService : Service() {
     private var duckRestoreRunnable: Runnable? = null
     private var alarmVolumeBeforeDuck: Int? = null
     private var ringtoneFallback: Ringtone? = null
-    private var tts: android.speech.tts.TextToSpeech? = null
     private var dpsWrittenForThisRing: Boolean = false
     private var playbackStarted: Boolean = false
     private var awaitingResume: Boolean = false
     private var resumeReceiver: BroadcastReceiver? = null
     private var playbackVolume: Float = 1.0f
     private var previousInterruptionFilter: Int? = null
+    private var isMissedAlarm: Boolean = false
+    private var ttsSpokenForCurrentAlarm: Boolean = false
+    private var ttsTimer: Timer? = null
 
     // Handler/Thread
     private lateinit var bgHandler: Handler
@@ -144,22 +132,22 @@ class AlarmForegroundService : Service() {
     private val notificationReposter: Runnable = object : Runnable {
         private var consecutiveFailures = 0
         private val maxFailures = 3
-        
+
         override fun run() {
             try {
                 val notification: Notification = buildNotification()
                 startForeground(1, notification)
                 consecutiveFailures = 0 // Reset on success
-                
+
                 // Log successful repost for debugging
                 android.util.Log.d(TAG, "Notification reposted successfully for alarmId=$currentAlarmId")
-                
+
                 // Schedule next repost
                 bgHandler.postDelayed(this, REPOST_DELAY_MS)
             } catch (e: Exception) {
                 consecutiveFailures++
                 android.util.Log.e(TAG, "Notification repost failed (attempt $consecutiveFailures/$maxFailures): ${e.message}")
-                
+
                 if (consecutiveFailures < maxFailures) {
                     // Retry with exponential backoff
                     val backoffDelay = REPOST_DELAY_MS * (1 shl consecutiveFailures - 1)
@@ -218,6 +206,14 @@ class AlarmForegroundService : Service() {
                 }
             } catch (_: Exception) { }
 
+            // Use the centralized launchAlarmActivity function
+            launchAlarmActivity()
+        } catch (_: Exception) { }
+    }
+
+    // Launch alarm activity (used by both activityLauncher and unlock receiver)
+    private fun launchAlarmActivity() {
+        try {
             val intent = Intent(this@AlarmForegroundService, AlarmActivity::class.java).apply {
                 addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -272,7 +268,7 @@ class AlarmForegroundService : Service() {
         alarmStorage = AlarmStorage(this)
 
         // Wake lock (PARTIAL while alarm active)
-        val powerManager: PowerManager = getSystemService()!!
+        val powerManager: PowerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "AlarmApp::AlarmService"
@@ -282,7 +278,7 @@ class AlarmForegroundService : Service() {
         bgThread.start()
         bgHandler = Handler(bgThread.looper)
 
-        vibrator = getSystemService()
+        vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
 
         // Foreground immediately
         val initial: Notification = buildNotification()
@@ -293,6 +289,45 @@ class AlarmForegroundService : Service() {
             val filter = IntentFilter("com.vaishnava.alarm.DUCK_ALARM")
             registerReceiver(duckReceiver, filter)
         } catch (_: Exception) { }
+
+        // Register user unlock receiver for DPS auto-launch scenario
+        val unlockReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == Intent.ACTION_USER_UNLOCKED) {
+                    android.util.Log.d(TAG, "User unlocked detected - checking if alarm activity should launch")
+                    // Only launch if we have an active alarm and haven't shown activity yet
+                    if (currentAlarmId != -1 && playbackStarted && !awaitingResume) {
+                        try {
+                            // Check if this was a DPS auto-launch scenario
+                            val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                createDeviceProtectedStorageContext() ?: this@AlarmForegroundService
+                            } else {
+                                this@AlarmForegroundService
+                            }
+                            val prefs = dps.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
+                            val wasDpsLaunch = prefs.getBoolean("dps_auto_launch_$currentAlarmId", false)
+                            
+                            if (wasDpsLaunch) {
+                                android.util.Log.d(TAG, "DPS auto-launch scenario detected - launching alarm activity after unlock")
+                                launchAlarmActivity()
+                                
+                                // Clear the DPS flag to prevent repeated launches
+                                prefs.edit().remove("dps_auto_launch_$currentAlarmId").apply()
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e(TAG, "Error checking DPS launch state: ${e.message}")
+                        }
+                    }
+                }
+            }
+        }
+        try {
+            val unlockFilter = IntentFilter(Intent.ACTION_USER_UNLOCKED)
+            registerReceiver(unlockReceiver, unlockFilter)
+            android.util.Log.d(TAG, "Registered user unlock receiver")
+        } catch (_: Exception) {
+            android.util.Log.e(TAG, "Failed to register unlock receiver")
+        }
 
         // Register notification dismiss receiver for proper cleanup
         val dismissReceiver = object : BroadcastReceiver() {
@@ -344,6 +379,9 @@ class AlarmForegroundService : Service() {
                 this@AlarmForegroundService.tts = null
             }
 
+            // Stop periodic TTS
+            stopPeriodicTTS()
+
             // Stop media player
             stopMediaPlayer()
 
@@ -355,6 +393,19 @@ class AlarmForegroundService : Service() {
 
             // Clear notifications
             clearNextAlarmNotification()
+
+            // Clear current service alarm ID tracking
+            try {
+                val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    createDeviceProtectedStorageContext() ?: this
+                } else {
+                    this
+                }
+                val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                prefs.edit()
+                    .remove("current_service_alarm_id")
+                    .apply()
+            } catch (_: Exception) { }
 
             restoreInterruptionFilterIfNeeded()
 
@@ -376,9 +427,36 @@ class AlarmForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val TAG = "AlarmForegroundService"
+
         val action = intent?.action
-        val alarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1)
-        android.util.Log.d(TAG, "onStartCommand: action=$action alarmId=$alarmId")
+        val alarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
+        
+        // Extract extras and update state
+        isWakeCheckLaunch = intent?.getBooleanExtra("from_wake_check", false) == true
+        isMissedAlarm = intent?.getBooleanExtra("is_missed_alarm", false) == true
+
+        // Check if this is a DPS auto-launch scenario (no activity shown yet)
+        if (alarmId != -1 && !isWakeCheckLaunch && !isMissedAlarm) {
+            try {
+                val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    createDeviceProtectedStorageContext() ?: this
+                } else {
+                    this
+                }
+                val prefs = dps.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
+                val dpsRingtone = prefs.getString("direct_boot_ringtone_$alarmId", null)
+                
+                // If DPS ringtone exists, this is likely a DPS auto-launch
+                if (dpsRingtone != null) {
+                    prefs.edit().putBoolean("dps_auto_launch_$alarmId", true).apply()
+                    android.util.Log.d(TAG, "Set DPS auto-launch flag for alarmId=$alarmId")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Error setting DPS launch flag: ${e.message}")
+            }
+        }
+        currentRepeatDays = intent?.getIntArrayExtra(AlarmReceiver.EXTRA_REPEAT_DAYS) ?: intArrayOf()
 
         // Handle repost notification action
         if (action == Constants.ACTION_REPOST_NOTIFICATION && alarmId != null && alarmId == currentAlarmId) {
@@ -412,8 +490,40 @@ class AlarmForegroundService : Service() {
         }
 
         // Extract extras
-        currentAlarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
+        val newAlarmId = alarmId
+
+        // CRITICAL Fix: Prevent the same alarm from starting multiple times
+        if (currentAlarmId == newAlarmId && playbackStarted) {
+            return START_STICKY
+        }
+
+        // If this is a different alarm from what's currently playing, stop the current one first
+        if (currentAlarmId != -1 && newAlarmId != -1 && currentAlarmId != newAlarmId) {
+            android.util.Log.d(TAG, "Alarm ID changed from $currentAlarmId to $newAlarmId, stopping current alarm before starting new one")
+            stopMediaPlayer()
+            stopVibration()
+            // Reset TTS flag for new alarm
+            ttsSpokenForCurrentAlarm = false
+            // Stop periodic TTS for old alarm
+            stopPeriodicTTS()
+        }
+
+        currentAlarmId = newAlarmId
+
+        // Track current service alarm ID in DPS for missed alarm prevention
+        try {
+            val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                createDeviceProtectedStorageContext() ?: this
+            } else {
+                this
+            }
+            val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putInt("current_service_alarm_id", currentAlarmId)
+                .apply()
+        } catch (_: Exception) { }
         isWakeCheckLaunch = intent?.getBooleanExtra("from_wake_check", false) == true
+        isMissedAlarm = intent?.getBooleanExtra("is_missed_alarm", false) == true
         this.ringtoneUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra(AlarmReceiver.EXTRA_RINGTONE_URI, Uri::class.java)
         } else {
@@ -479,7 +589,7 @@ class AlarmForegroundService : Service() {
                 val isSilenceRingtone = try {
                     val ringtoneUri = this.ringtoneUri?.toString()
                     Log.d(TAG, "SERVICE_TTS_CHECK: alarmId=$currentAlarmId ringtoneUri=$ringtoneUri")
-                    
+
                     val containsSilence = if (ringtoneUri?.startsWith("android.resource://") == true) {
                         // Extract resource ID and check if it's silence_no_sound
                         val uriParts = ringtoneUri.split("/")
@@ -495,48 +605,26 @@ class AlarmForegroundService : Service() {
                     } else {
                         ringtoneUri?.contains("silence_no_sound") == true
                     }
-                    
+
                     Log.d(TAG, "SERVICE_TTS_CHECK: containsSilence=$containsSilence")
-                    
+
                     // Write to persistent log file
                     writePersistentLog("SERVICE_TTS_CHECK: alarmId=$currentAlarmId ringtoneUri=$ringtoneUri containsSilence=$containsSilence")
-                    
+
                     // Add to app's sequencer log system
                     MainActivity.getInstance()?.addSequencerLog("SERVICE_TTS_CHECK: alarmId=$currentAlarmId ringtoneUri=$ringtoneUri containsSilence=$containsSilence")
-                    
+
                     containsSilence
-                } catch (_: Exception) { 
+                } catch (_: Exception) {
                     Log.d(TAG, "SERVICE_TTS_CHECK: Exception checking ringtone")
                     writePersistentLog("SERVICE_TTS_CHECK: Exception checking ringtone for alarmId=$currentAlarmId")
                     MainActivity.getInstance()?.addSequencerLog("SERVICE_TTS_CHECK: Exception checking ringtone for alarmId=$currentAlarmId")
-                    false 
+                    false
                 }
 
                 if (!isSilenceRingtone) {
-                    val nowStr: String = try {
-                        val fmt = java.text.SimpleDateFormat("h:mm a", Locale.getDefault())
-                        fmt.format(java.util.Date())
-                    } catch (_: Exception) { "now" }
-                    val message = "The time is $nowStr. It is time to wake up now."
-                    
-                    // Inline TTS implementation
-                    if (tts == null) {
-                        tts = android.speech.tts.TextToSpeech(this) { status ->
-                            if (status == android.speech.tts.TextToSpeech.SUCCESS) {
-                                try { tts?.language = Locale.getDefault() } catch (_: Exception) {}
-                                try {
-                                    val attrs = android.media.AudioAttributes.Builder()
-                                        .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-                                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                                        .build()
-                                    tts?.setAudioAttributes(attrs)
-                                } catch (_: Exception) { }
-                                try { tts?.speak(message, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "WAKE_MSG_SVC") } catch (_: Exception) { }
-                            }
-                        }
-                    } else {
-                        try { tts?.speak(message, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, "WAKE_MSG_SVC") } catch (_: Exception) { }
-                    }
+                    // Start periodic TTS announcements
+                    startPeriodicTTS()
                 } else {
                     Log.d(TAG, "Silence ringtone detected - TTS disabled in service")
                 }
@@ -640,7 +728,7 @@ class AlarmForegroundService : Service() {
                 startActivity(immediateIntent)
                 android.util.Log.d("WakeCheckDebug", "AlarmForegroundService: started immediate activity for alarmId=$currentAlarmId isWakeCheckLaunch=$isWakeCheckLaunch")
             } catch (_: Exception) { }
-            
+
             // Also schedule delayed launch as backup
             if (launcherScheduled.compareAndSet(false, true)) {
                 bgHandler.postDelayed(activityLauncher, 50) // Reduced delay to 50ms for faster response
@@ -726,7 +814,7 @@ class AlarmForegroundService : Service() {
             }
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Error accessing cached ringtone, using silence fallback", e)
-            val silenceResourceId = context.resources.getIdentifier("silence_no_sound", "raw", context.packageName)
+            val silenceResourceId = context.resources.getIdentifier("silence_no_sound", "raw", packageName)
             if (silenceResourceId != 0) {
                 Uri.parse("android.resource://${context.packageName}/$silenceResourceId")
             } else {
@@ -739,7 +827,7 @@ class AlarmForegroundService : Service() {
         return try {
             // Try to use the provided ringtone URI first
             this.ringtoneUri?.let { return it }
-            
+
             // Fallback to silence_no_sound if no ringtone is set
             val silenceResourceId = resources.getIdentifier("silence_no_sound", "raw", packageName)
             if (silenceResourceId != 0) {
@@ -789,10 +877,22 @@ class AlarmForegroundService : Service() {
         mediaPlayer = null
 
         // Get the appropriate ringtone URI (cached if available)
-        val finalRingtoneUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
-            this@AlarmForegroundService.isDeviceProtectedStorage) {
-            getCachedRingtoneUri(this@AlarmForegroundService, ringtoneUri, currentAlarmId)
+        // CRITICAL FIX: Always use direct URI to prevent cache fallback to device default
+        // This is the same fix that resolved DPS missed alarms - apply to ALL alarms
+        val useCache = false // NEVER use cache - always use direct URI like DPS missed alarms
+
+        val finalRingtoneUri = if (useCache) {
+            android.util.Log.d(TAG, "Using cache for normal alarm - cache lookup")
+            val cachedUri = getCachedRingtoneUri(this@AlarmForegroundService, ringtoneUri, currentAlarmId)
+            if (cachedUri.toString().contains("silence_no_sound")) {
+                android.util.Log.w(TAG, "Cache returned silence, using provided ringtone URI directly")
+                ringtoneUri
+            } else {
+                cachedUri
+            }
         } else {
+            // ALWAYS use direct URI - same as DPS missed alarms fix
+            android.util.Log.d(TAG, "Using direct URI (DPS-style fix) for alarm: $ringtoneUri")
             ringtoneUri
         }
 
@@ -924,18 +1024,29 @@ class AlarmForegroundService : Service() {
             }
             mediaPlayer = mp
 
+            // ======== CRITICAL: start periodic TTS only after playback started ========
+            try {
+                playbackStarted = true // ensure flag set
+                android.util.Log.d(TAG, "MediaPlayer started — triggering startPeriodicTTS() for alarmId=$currentAlarmId")
+                // Start TTS on background handler to match rest of service scheduling (startPeriodicTTS defers if not ready)
+                bgHandler.post { startPeriodicTTS() }
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Failed to post startPeriodicTTS after media start: ${e.message}")
+            }
+
         } catch (_: Exception) {
-            // Ringtone fallback - try default alarm sound if custom one fails
+            // Ringtone fallback - try the provided ringtone first, not device default
             try {
                 var fallbackUri = finalRingtoneUri
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isDeviceProtectedStorage) {
-                    fallbackUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                }
+                // CRITICAL FIX: Don't fall back to device default alarm - use the provided ringtone
+                // The cache mechanism may have failed, but we still want the selected ringtone
 
                 val ring: Ringtone = try {
                     RingtoneManager.getRingtone(this, fallbackUri)
                 } catch (e: Exception) {
-                    RingtoneManager.getRingtone(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM))
+                    // If the provided URI fails, try the original ringtoneUri directly
+                    android.util.Log.w(TAG, "Fallback URI failed, trying original ringtoneUri: $ringtoneUri")
+                    RingtoneManager.getRingtone(this, ringtoneUri)
                 }
 
                 ring.audioAttributes = audioAttributes
@@ -955,6 +1066,15 @@ class AlarmForegroundService : Service() {
                     dpsWrittenForThisRing = true
                 }
                 ringtoneFallback = ring
+
+                // ======== CRITICAL: start periodic TTS only after ringtone started ========
+                try {
+                    playbackStarted = true
+                    android.util.Log.d(TAG, "Ringtone fallback started — triggering startPeriodicTTS() for alarmId=$currentAlarmId")
+                    bgHandler.post { startPeriodicTTS() }
+                } catch (e: Exception) {
+                    android.util.Log.e(TAG, "Failed to post startPeriodicTTS after ringtone start: ${e.message}")
+                }
             } catch (_: Exception) { }
         }
     }
@@ -1008,7 +1128,7 @@ class AlarmForegroundService : Service() {
             }
         } catch (_: Exception) { }
         if (vibrator == null) {
-            vibrator = getSystemService()
+            vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
         try { vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 500), 0)) } catch (_: Exception) { }
         writePendingResumeFlag(currentAlarmId, false)
@@ -1075,6 +1195,294 @@ class AlarmForegroundService : Service() {
         }
     }
 
+    // ---------- FOR FORENSIC TTS SUBSYSTEM (REPLACE existing TTS fields & functions) ----------
+
+// Fields (replace prior TTS-related fields)
+private var tts: android.speech.tts.TextToSpeech? = null
+private val mainHandler: Handler by lazy { Handler(Looper.getMainLooper()) } // MUST use main/UI thread for TTS
+private val ttsActiveUtterances = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())!!
+private val ttsCounter = AtomicInteger(0)
+private val ttsListenerSet = AtomicBoolean(false)
+private var isPeriodicTTSRunning = false
+private var ttsPeriodicRunnable: Runnable? = null
+private var ttsPollRunnable: Runnable? = null
+private var ttsWatchdogRunnable: Runnable? = null
+
+private val ttsPauseMs: Long = 15_000L
+private val ttsInitialDelayMs: Long = 20_000L
+private val ttsUtteranceWatchdogMs: Long = 18_000L
+private val ttsPollIntervalMs: Long = 300L
+
+// Helper: forensic log wrapper
+private fun ttsForensicLog(msg: String) {
+    android.util.Log.d(TAG, "TTS-FOR: $msg")
+    try { writePersistentLog("TTS-FOR: $msg") } catch (_: Exception) {}
+}
+
+// Ensure single TTS initialization on main thread
+private fun ensureTTSInitialized(onReady: (() -> Unit)? = null) {
+    mainHandler.post {
+        try {
+            if (tts == null) {
+                ttsForensicLog("Initializing TTS instance")
+                tts = android.speech.tts.TextToSpeech(this@AlarmForegroundService) { status ->
+                    mainHandler.post {
+                        ttsForensicLog("TTS init status: $status")
+                        if (status == android.speech.tts.TextToSpeech.SUCCESS) {
+                            if (!ttsListenerSet.get()) {
+                                setupTTSListenerMainThread()
+                            }
+                            onReady?.invoke()
+                        } else {
+                            ttsForensicLog("TTS init failed with status $status")
+                            onReady?.invoke() // still attempt to proceed to avoid deadlock
+                        }
+                    }
+                }
+            } else {
+                onReady?.invoke()
+            }
+        } catch (e: Exception) {
+            ttsForensicLog("ensureTTSInitialized exception: ${e.message}")
+            onReady?.invoke()
+        }
+    }
+}
+
+// Start periodic TTS (single speak -> wait for done -> pause -> next)
+private fun startPeriodicTTS() {
+    // DEFENSIVE GUARD: don't start TTS until playbackStarted is true and we're not awaiting resume.
+    // If called too early, retry after 500ms. This prevents starting TTS during service start race.
+    if (!playbackStarted || awaitingResume || currentAlarmId == -1) {
+        android.util.Log.d(TAG, "startPeriodicTTS called too early (playbackStarted=$playbackStarted, awaitingResume=$awaitingResume, alarmId=$currentAlarmId). Deferring start.")
+        // Retry once shortly — use bgHandler to maintain same threading model
+        try {
+            bgHandler.postDelayed({ startPeriodicTTS() }, 500L)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to defer startPeriodicTTS: ${e.message}")
+        }
+        return
+    }
+
+    // Prevent multiple starts
+    if (isPeriodicTTSRunning) {
+        ttsForensicLog("startPeriodicTTS: already running")
+        return
+    }
+    stopPeriodicTTS()
+    isPeriodicTTSRunning = true
+    ttsForensicLog("startPeriodicTTS: STARTED for alarmId=$currentAlarmId")
+
+    var announcementCount = 0
+
+    ttsPeriodicRunnable = object : Runnable {
+        override fun run() {
+            if (!isPeriodicTTSRunning) {
+                ttsForensicLog("periodic runnable: stopped flag set")
+                return
+            }
+
+            if (!playbackStarted || awaitingResume || currentAlarmId == -1) {
+                ttsForensicLog("periodic runnable: conditions not met (playbackStarted=$playbackStarted, awaitingResume=$awaitingResume, alarmId=$currentAlarmId). Stopping.")
+                isPeriodicTTSRunning = false
+                return
+            }
+
+            announcementCount++
+            val utteranceId = "TTS_${System.currentTimeMillis()}_${ttsCounter.incrementAndGet()}_#${announcementCount}"
+            val nowStr = java.text.SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
+            val message = "The time is $nowStr. Time to wake up."
+
+            ttsForensicLog("periodic runnable: preparing utteranceId=$utteranceId message='$message'")
+
+            // Ensure TTS initialized & speak on main thread
+            ensureTTSInitialized {
+                mainHandler.post {
+                    try {
+                        // Force stop any previous speaks to avoid overlapping audio on problematic engines
+                        try {
+                            ttsForensicLog("calling tts.stop() before speak for utteranceId=$utteranceId")
+                            tts?.stop()
+                        } catch (_: Exception) { }
+
+                        // register utterance as active BEFORE speak (for safety)
+                        ttsActiveUtterances.add(utteranceId)
+                        ttsForensicLog("registered active utterance: $utteranceId (total active=${ttsActiveUtterances.size})")
+
+                        // watchdog to protect stuck utterance
+                        ttsWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+                        ttsWatchdogRunnable = Runnable {
+                            ttsForensicLog("watchdog fired for utteranceId=$utteranceId — forcing cleanup")
+                            ttsActiveUtterances.remove(utteranceId)
+                            cancelTTSPollMain()
+                            scheduleNextTTSWithPauseMain()
+                        }
+                        mainHandler.postDelayed(ttsWatchdogRunnable!!, ttsUtteranceWatchdogMs)
+
+                        // Speak (API21+). Use QUEUE_FLUSH to ensure engine resets and only this plays
+                        tts?.speak(message, android.speech.tts.TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                        // start poll to double-check completion (some engines miss callbacks)
+                        startTTSPollMain(utteranceId)
+                        ttsForensicLog("issued tts.speak for utteranceId=$utteranceId")
+                    } catch (e: Exception) {
+                        ttsForensicLog("exception while speaking utteranceId=$utteranceId: ${e.message}")
+                        ttsActiveUtterances.remove(utteranceId)
+                        cancelTTSPollMain()
+                        scheduleNextTTSWithPauseMain()
+                    }
+                }
+            }
+        }
+    }
+
+    // initial delay (keep 20s like before)
+    bgHandler.postDelayed(ttsPeriodicRunnable!!, ttsInitialDelayMs)
+}
+
+// Poller runs on main thread and monitors tts.isSpeaking() for the exact utterance
+private fun startTTSPollMain(expectedUtteranceId: String) {
+    // cancel previous poll if any
+    cancelTTSPollMain()
+    ttsPollRunnable = Runnable {
+        try {
+            val speaking = try { tts?.isSpeaking == true } catch (_: Exception) { false }
+            // If engine reports not speaking and our active set does not contain expected utterance -> treat as done
+            if (!speaking && !ttsActiveUtterances.contains(expectedUtteranceId)) {
+                // already handled by listener path possibly
+                ttsForensicLog("poll: not speaking and utterance not active: $expectedUtteranceId -> scheduling next")
+                cancelTTSWatchdogMain()
+                cancelTTSPollMain()
+                scheduleNextTTSWithPauseMain()
+                return@Runnable
+            }
+
+            // If engine not speaking but our active set still contains it - normalize (clear)
+            if (!speaking && ttsActiveUtterances.contains(expectedUtteranceId)) {
+                ttsForensicLog("poll: engine not speaking but active set contains $expectedUtteranceId; normalizing (removing) and scheduling next")
+                ttsActiveUtterances.remove(expectedUtteranceId)
+                cancelTTSWatchdogMain()
+                cancelTTSPollMain()
+                scheduleNextTTSWithPauseMain()
+                return@Runnable
+            }
+
+            // If engine speaking and active set lacks it (rare), add it
+            if (speaking && !ttsActiveUtterances.contains(expectedUtteranceId)) {
+                ttsForensicLog("poll: engine isSpeaking==true but active set missing $expectedUtteranceId; adding to active set")
+                ttsActiveUtterances.add(expectedUtteranceId)
+            }
+
+            // continue polling
+            mainHandler.postDelayed(ttsPollRunnable!!, ttsPollIntervalMs)
+        } catch (e: Exception) {
+            ttsForensicLog("poll exception for $expectedUtteranceId: ${e.message}")
+            cancelTTSWatchdogMain()
+            cancelTTSPollMain()
+            ttsActiveUtterances.remove(expectedUtteranceId)
+            scheduleNextTTSWithPauseMain()
+        }
+    }
+
+    mainHandler.postDelayed(ttsPollRunnable!!, ttsPollIntervalMs)
+}
+
+private fun cancelTTSPollMain() {
+    ttsPollRunnable?.let { mainHandler.removeCallbacks(it) }
+    ttsPollRunnable = null
+}
+
+private fun cancelTTSWatchdogMain() {
+    ttsWatchdogRunnable?.let { mainHandler.removeCallbacks(it) }
+    ttsWatchdogRunnable = null
+}
+
+// schedule next announcement only from main thread (guaranteed pause)
+private fun scheduleNextTTSWithPauseMain() {
+    if (!isPeriodicTTSRunning) {
+        ttsForensicLog("scheduleNext: periodic stopped, not scheduling")
+        return
+    }
+    ttsForensicLog("scheduling next TTS in ${ttsPauseMs}ms")
+    mainHandler.postDelayed({
+        // run the periodic runnable on the background handler (original design)
+        try {
+            ttsPeriodicRunnable?.let { bgHandler.post(it) }
+        } catch (e: Exception) {
+            ttsForensicLog("failed to post periodic runnable to bgHandler: ${e.message}")
+            // fallback: run on main thread if bgHandler fails
+            ttsPeriodicRunnable?.run()
+        }
+    }, ttsPauseMs)
+}
+
+// Setup UtteranceProgressListener on main thread (must be on main)
+private fun setupTTSListenerMainThread() {
+    mainHandler.post {
+        try {
+            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    if (utteranceId == null) return
+                    ttsForensicLog("Listener onStart for $utteranceId")
+                    ttsActiveUtterances.add(utteranceId)
+                }
+
+                override fun onDone(utteranceId: String?) {
+                    if (utteranceId == null) return
+                    ttsForensicLog("Listener onDone for $utteranceId")
+                    ttsActiveUtterances.remove(utteranceId)
+                    cancelTTSWatchdogMain()
+                    cancelTTSPollMain()
+                    scheduleNextTTSWithPauseMain()
+                }
+
+                override fun onError(utteranceId: String?) {
+                    if (utteranceId == null) return
+                    ttsForensicLog("Listener onError for $utteranceId")
+                    ttsActiveUtterances.remove(utteranceId)
+                    cancelTTSWatchdogMain()
+                    cancelTTSPollMain()
+                    scheduleNextTTSWithPauseMain()
+                }
+            })
+            ttsListenerSet.set(true)
+            ttsForensicLog("TTS listener installed on main thread")
+        } catch (e: Exception) {
+            ttsForensicLog("setupTTSListenerMainThread exception: ${e.message}")
+        }
+    }
+}
+
+private fun stopPeriodicTTS() {
+    mainHandler.post {
+        ttsForensicLog("Stopping periodic TTS (main thread)")
+        isPeriodicTTSRunning = false
+        // cancel bg periodic runnable too
+        ttsPeriodicRunnable?.let { try { bgHandler.removeCallbacks(it) } catch (_: Exception) {} }
+        // cancel any main thread polls/watchdogs
+        cancelTTSPollMain()
+        cancelTTSWatchdogMain()
+        // clear active utterances set
+        ttsActiveUtterances.clear()
+        try { tts?.stop() } catch (_: Exception) {}
+    }
+}
+
+// Shutdown TTS when service fully stops (call in onDestroy/stopAlarm)
+private fun shutdownTTSForensic() {
+    mainHandler.post {
+        ttsForensicLog("shutdownTTSForensic called")
+        try {
+            tts?.stop()
+        } catch (_: Exception) {}
+        try {
+            tts?.shutdown()
+        } catch (_: Exception) {}
+        tts = null
+        ttsListenerSet.set(false)
+        ttsActiveUtterances.clear()
+    }
+}
+
     // ========= Notifications =========
 
     private fun buildNotification(): Notification {
@@ -1094,7 +1502,7 @@ class AlarmForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val builder = NotificationCompat.Builder(this, "alarm_channel")
+        val builder = NotificationCompat.Builder(this, "alarm_channel_v2")
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(android.graphics.Color.parseColor("#1976D2"))
             .setOngoing(true)
@@ -1137,8 +1545,16 @@ class AlarmForegroundService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+            // CRITICAL Fix: Delete existing channel to remove sound permanently
+            // Android doesn't allow updating notification sound after channel creation
+            try {
+                notificationManager.deleteNotificationChannel("alarm_channel")
+            } catch (e: Exception) { }
+
             val channel = NotificationChannel(
-                "alarm_channel",
+                "alarm_channel_v2", // Use new ID to ensure no sound
                 "Alarm Notifications",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
@@ -1146,20 +1562,12 @@ class AlarmForegroundService : Service() {
                 enableVibration(true)
                 enableLights(true)
                 setShowBadge(true)
-                // Set proper sound for alarm notifications
-                val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-                val audioAttributes = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ALARM)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-                setSound(soundUri, audioAttributes)
-                // Enable bypassing DND for alarms
-                setBypassDnd(true)
-                // Show on lock screen
-                lockscreenVisibility = NotificationCompat.VISIBILITY_PUBLIC
+                // CRITICAL Fix: Remove notification sound to prevent dual audio
+                // The service already plays the correct ringtone, notification shouldn't play sound
+                setSound(null, null) // Disable notification sound completely
             }
-            val nm: NotificationManager = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(channel)
+
+            notificationManager.createNotificationChannel(channel)
         }
     }
 
@@ -1195,7 +1603,7 @@ class AlarmForegroundService : Service() {
             .setName("Alarm Assistant")
             .setImportant(true)
             .build()
-        
+
         val messaging = NotificationCompat.MessagingStyle(me)
             .addMessage(content, System.currentTimeMillis(), me)
             .setConversationTitle("Alarm Reminder")

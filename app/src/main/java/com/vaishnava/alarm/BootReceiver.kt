@@ -76,6 +76,12 @@ class BootReceiver : BroadcastReceiver() {
                 ctx
             }
 
+        // If this is LOCKED_BOOT_COMPLETED, skip alarm rescheduling since DirectBootRestoreReceiver handles it
+        if (action == Intent.ACTION_LOCKED_BOOT_COMPLETED) {
+            Log.d("AlarmApp", "BootReceiver: LOCKED_BOOT_COMPLETED detected, skipping reschedule (handled by DirectBootRestoreReceiver)")
+            return
+        }
+
         // If we are in USER_UNLOCKED, migrate any alarms from credential-protected storage
         if (action == Intent.ACTION_USER_UNLOCKED) {
             try {
@@ -204,74 +210,14 @@ class BootReceiver : BroadcastReceiver() {
                     val info = android.app.AlarmManager.AlarmClockInfo(triggerAt, showIntent)
                     am.setAlarmClock(info, fireIntent)
                     Log.d("AlarmApp", "Re-ring scheduled via setAlarmClock in ~1s for ID: $ringId")
-                    // Also schedule a silent backup in case AlarmClock path is throttled
-                    try {
-                        am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAt + 500, fireIntent)
-                        Log.d("AlarmApp", "Backup setExactAndAllowWhileIdle scheduled for ID: $ringId")
-                    } catch (_: Exception) {
-                        // ignore
-                    }
-
-                    // Extra backup: WAKE_UP broadcast at ~1.5s with unique requestCode
-                    try {
-                        val wakeIntent = android.app.PendingIntent.getBroadcast(
-                            deviceProtectedContext,
-                            ringId xor 0x4A11,
-                            Intent(deviceProtectedContext, AlarmReceiver::class.java).apply {
-                                action = "com.vaishnava.alarm.WAKE_UP"
-                                data = android.net.Uri.parse("alarm-wakeup://$ringId")
-                                putExtra(AlarmReceiver.ALARM_ID, ringId)
-                            },
-                            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                        )
-                        am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, nowTs + 1500, wakeIntent)
-                    } catch (_: Exception) { }
-
-                    // Immediate in-app broadcast fallback to trigger AlarmReceiver right now
-                    try {
-                        val immediate = Intent(deviceProtectedContext, AlarmReceiver::class.java).apply {
-                            action = "com.vaishnava.alarm.DIRECT_BOOT_ALARM"
-                            data = android.net.Uri.parse("alarm-immediate://$ringId")
-                            putExtra(AlarmReceiver.ALARM_ID, ringId)
-                        }
-                        deviceProtectedContext.sendBroadcast(immediate)
-                    } catch (_: Exception) { }
+                    // CRITICAL FIX: Remove all backup alarms to prevent multiple simultaneous alarms firing
+                    
+                    // CRITICAL FIX: Remove immediate broadcast to prevent dual audio with missed alarms
+                    // The setAlarmClock trigger is sufficient - immediate broadcast causes duplicate AlarmForegroundService
+                    Log.d("AlarmApp", "Re-ring scheduled via setAlarmClock in ~1s for ID: $ringId (no immediate broadcast to prevent dual audio)")
                 } catch (e: Exception) {
-                    // Fallback path rebuilds its own AlarmManager and PendingIntent
-                    try {
-                        val am2 = deviceProtectedContext.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-                        val fireIntent2 = android.app.PendingIntent.getBroadcast(
-                            deviceProtectedContext,
-                            ringId,
-                            Intent(deviceProtectedContext, AlarmReceiver::class.java).apply {
-                                action = "com.vaishnava.alarm.DIRECT_BOOT_ALARM"
-                                data = android.net.Uri.parse("alarm://$ringId")
-                                putExtra(AlarmReceiver.ALARM_ID, ringId)
-                            },
-                            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                        )
-                        val triggerAt2 = System.currentTimeMillis() + 1500
-                        am2.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, triggerAt2, fireIntent2)
-                        Log.d("AlarmApp", "Fallback setExactAndAllowWhileIdle scheduled for ID: $ringId")
-                    } catch (_: Exception) {
-                        try {
-                            val am3 = deviceProtectedContext.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-                            val fireIntent3 = android.app.PendingIntent.getBroadcast(
-                                deviceProtectedContext,
-                                ringId,
-                                Intent(deviceProtectedContext, AlarmReceiver::class.java).apply {
-                                    action = "com.vaishnava.alarm.DIRECT_BOOT_ALARM"
-                                    data = android.net.Uri.parse("alarm://$ringId")
-                                    putExtra(AlarmReceiver.ALARM_ID, ringId)
-                                },
-                                android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                            )
-                            val triggerAt3 = System.currentTimeMillis() + 2000
-                            am3.set(android.app.AlarmManager.RTC_WAKEUP, triggerAt3, fireIntent3)
-                        } catch (_: Exception) {
-                            // ignore
-                        }
-                    }
+                    // CRITICAL FIX: Remove all fallback backup alarms to prevent multiple simultaneous alarms firing
+                    Log.d("AlarmApp", "All alarm scheduling methods failed for ID: $ringId")
                 }
             }
 
