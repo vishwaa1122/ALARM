@@ -132,6 +132,14 @@ class AndroidAlarmScheduler(private val context: Context) : AlarmScheduler {
             Log.e("AlarmScheduler", "❌ Failed to schedule alarm ID ${alarm.id} via setExact: ${e.message}", e)
             try {
                 // Final fallback - try setAlarmClock if exact methods fail
+                // But NOT for sequencer alarms - let the MissionSequencer handle launching individual missions
+                if (alarm.missionType == "sequencer") {
+                    // For sequencer alarms, don't use setAlarmClock fallback - just use regular broadcast
+                    // The MissionSequencer will handle launching the actual missions
+                    Log.d("AlarmScheduler", "Skipping setAlarmClock fallback for sequencer alarm ${alarm.id}")
+                    return
+                }
+                
                 val showActivityIntent = Intent(context, AlarmActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                     putExtra(AlarmReceiver.ALARM_ID, alarm.id)

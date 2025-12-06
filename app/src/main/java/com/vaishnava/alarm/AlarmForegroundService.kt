@@ -432,6 +432,13 @@ class AlarmForegroundService : Service() {
         val action = intent?.action
         val alarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
         
+        // CRITICAL: Handle STOP_ALARM_SERVICE action for sequencer completion
+        if (action == "com.vaishnava.alarm.STOP_ALARM_SERVICE") {
+            Log.d(TAG, "STOP_ALARM_SERVICE received, stopping service")
+            stopAlarm()
+            return START_NOT_STICKY
+        }
+        
         // Extract extras and update state
         isWakeCheckLaunch = intent?.getBooleanExtra("from_wake_check", false) == true
         isMissedAlarm = intent?.getBooleanExtra("is_missed_alarm", false) == true
@@ -708,9 +715,17 @@ class AlarmForegroundService : Service() {
         // explicitly requested to skip launching (e.g., wake-check timeout
         // restart from AlarmActivity which already has UI on screen).
         if (!skipActivityLaunch) {
-            // Immediate launch to ensure activity comes to front right away
-            try {
-                val immediateIntent = Intent(this, AlarmActivity::class.java).apply {
+            // CRITICAL FIX: Check if this is a sequencer alarm before launching AlarmActivity
+            val alarm = try {
+                alarmStorage.getAlarm(currentAlarmId)
+            } catch (_: Exception) {
+                null
+            }
+            
+            if (alarm?.missionType != "sequencer") {
+                // Only launch AlarmActivity immediately for non-sequencer alarms
+                try {
+                    val immediateIntent = Intent(this, AlarmActivity::class.java).apply {
                     addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK or
                                 Intent.FLAG_ACTIVITY_CLEAR_TOP or
@@ -732,6 +747,9 @@ class AlarmForegroundService : Service() {
             // Also schedule delayed launch as backup
             if (launcherScheduled.compareAndSet(false, true)) {
                 bgHandler.postDelayed(activityLauncher, 50) // Reduced delay to 50ms for faster response
+            }
+            } else {
+                android.util.Log.d("WakeCheckDebug", "AlarmForegroundService: SKIPPING immediate activity launch for sequencer alarm $currentAlarmId - MissionSequencer will handle it")
             }
         }
 

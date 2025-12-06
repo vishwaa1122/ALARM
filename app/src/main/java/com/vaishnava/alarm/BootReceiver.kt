@@ -186,15 +186,37 @@ class BootReceiver : BroadcastReceiver() {
                 // Re-ring via setAlarmClock(now + 1000)
                 try {
                     val am = deviceProtectedContext.getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
-                    val showIntent = android.app.PendingIntent.getActivity(
-                        deviceProtectedContext,
-                        ringId xor 0x0100,
-                        Intent(deviceProtectedContext, AlarmActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                            putExtra(AlarmReceiver.ALARM_ID, ringId)
-                        },
-                        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                    )
+                    
+                    // Check if this is a sequencer alarm - if so, don't launch AlarmActivity directly
+                    val alarm = try {
+                        val storage = AlarmStorage(deviceProtectedContext)
+                        storage.getAlarm(ringId)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    
+                    val showIntent = if (alarm?.missionType != "sequencer") {
+                        android.app.PendingIntent.getActivity(
+                            deviceProtectedContext,
+                            ringId xor 0x0100,
+                            Intent(deviceProtectedContext, AlarmActivity::class.java).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                                putExtra(AlarmReceiver.ALARM_ID, ringId)
+                            },
+                            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                        )
+                    } else {
+                        // For sequencer alarms, create a broadcast PendingIntent instead
+                        android.app.PendingIntent.getBroadcast(
+                            deviceProtectedContext,
+                            ringId xor 0x0100,
+                            Intent(deviceProtectedContext, AlarmReceiver::class.java).apply {
+                                action = "com.vaishnava.alarm.SEQUENCER_BOOT_ALARM"
+                                putExtra(AlarmReceiver.ALARM_ID, ringId)
+                            },
+                            android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+                        )
+                    }
                     val fireIntent = android.app.PendingIntent.getBroadcast(
                         deviceProtectedContext,
                         ringId,

@@ -138,25 +138,31 @@ class MissionQueueStore(private val context: Context) {
         }
     }
     
-    fun clearCurrentMission() {
-        try {
-            if (currentMissionFile.exists()) {
-                currentMissionFile.delete()
-                MissionLogger.log("CURRENT_STORE_CLEAR_DONE: fileDeleted=true path=${currentMissionFile.absolutePath}")
-            }
-        } catch (e: Exception) {
-            MissionLogger.logError("Failed to clear current mission", e)
-        }
-    }
-    
     fun clearQueue() {
         try {
+            MissionLogger.log("QUEUE_STORE_CLEAR_START: path=${queueFile.absolutePath}")
             if (queueFile.exists()) {
                 queueFile.delete()
-                MissionLogger.log("QUEUE_STORE_CLEAR_DONE: fileDeleted=true path=${queueFile.absolutePath}")
+                MissionLogger.log("QUEUE_STORE_CLEAR_DONE: queue file deleted")
+            } else {
+                MissionLogger.log("QUEUE_STORE_CLEAR_SKIP: queue file does not exist")
             }
         } catch (e: Exception) {
             MissionLogger.logError("Failed to clear queue", e)
+        }
+    }
+    
+    fun clearCurrentMission() {
+        try {
+            MissionLogger.log("CURRENT_STORE_CLEAR_START: path=${currentMissionFile.absolutePath}")
+            if (currentMissionFile.exists()) {
+                currentMissionFile.delete()
+                MissionLogger.log("CURRENT_STORE_CLEAR_DONE: current mission file deleted")
+            } else {
+                MissionLogger.log("CURRENT_STORE_CLEAR_SKIP: current mission file does not exist")
+            }
+        } catch (e: Exception) {
+            MissionLogger.logError("Failed to clear current mission", e)
         }
     }
 }

@@ -14,6 +14,7 @@ import com.vaishnava.alarm.data.resolveRingtoneTitle
 import android.Manifest
 import android.app.Activity
 import android.app.AlarmManager
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -150,6 +151,7 @@ import com.vaishnava.alarm.ui.theme.AlarmTheme
 import com.vaishnava.alarm.sequencer.MissionSequencer
 import com.vaishnava.alarm.sequencer.MissionLogger
 import com.vaishnava.alarm.sequencer.MissionSpec
+import com.vaishnava.alarm.sequencer.MissionQueueStore
 import java.util.Calendar
 
 class MainActivity : BaseActivity() {
@@ -215,20 +217,6 @@ class MainActivity : BaseActivity() {
         super.onResume()
         // Try to restore again in case sign-in just completed
         tryRestoreFromCloud()
-        
-        // Ensure sequencer is running and restored
-        missionSequencer.let { sequencer ->
-            if (sequencer.getQueueSize() > 0 && !sequencer.isMissionRunning()) {
-                MissionLogger.log("MAIN_ACTIVITY_RESUME: queue exists but no mission running, ensuring continuation")
-                sequencer.scope.launch {
-                    delay(500) // Brief delay to allow any pending broadcasts
-                    if (!sequencer.isMissionRunning() && sequencer.getQueueSize() > 0) {
-                        MissionLogger.log("MAIN_ACTIVITY_FORCE_CONTINUE: forcing queue processing")
-                        sequencer.processQueue()
-                    }
-                }
-            }
-        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -329,6 +317,19 @@ class MainActivity : BaseActivity() {
                                 createdTime = System.currentTimeMillis() // Track creation time
                             )
                             Log.d("AlarmApp", "Created alarm object with ID: ${alarm.id}")
+                            
+                            // If this is a sequencer alarm, update the queued missions with the alarm ID
+                            if (missionType == "sequencer") {
+                                Log.d("MainActivity", "Updating sequencer missions with alarm ID: $alarmId")
+                                val currentQueue = missionSequencer.getQueueStore().loadQueue()
+                                val updatedQueue = currentQueue.map { mission ->
+                                    mission.copy(
+                                        params = mission.params + ("alarm_id" to alarmId.toString())
+                                    )
+                                }
+                                missionSequencer.getQueueStore().saveQueue(updatedQueue)
+                                Log.d("MainActivity", "Updated ${updatedQueue.size} missions with alarm ID")
+                            }
                             
                             // CRITICAL: Check exact alarm permission before scheduling (Android 15+ fix)
                             val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -766,7 +767,11 @@ class MainActivity : BaseActivity() {
     // =====================================================
     // Main Function (original kept; new logic appended)
     // =====================================================
-    private fun checkAndShowUpcomingAlarmNotification() {
+    fun resetNotificationTracking() {
+        lastNotifiedAlarmId = null
+    }
+
+    fun checkAndShowUpcomingAlarmNotification() {
         try {
             val nextAlarm = getNextScheduledAlarm()
             if (nextAlarm != null) {
@@ -1537,76 +1542,7 @@ fun AlarmScreenContent(
                     .weight(1f)
             ) {
                 if (alarms.isEmpty()) {
-                    item {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = Color(0xFF1E1E1E)
-                                ),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-                            ) {
-                                Column(
-                                    modifier = Modifier.padding(28.dp),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.AlarmOff,
-                                        contentDescription = "No Alarms",
-                                        tint = Color.White,
-                                        modifier = Modifier
-                                            .size(56.dp)
-                                            .padding(bottom = 12.dp)
-                                    )
-                                    Text(
-                                        text = "No alarms set",
-                                        fontSize = 20.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                        modifier = Modifier.padding(bottom = 6.dp)
-                                    )
-                                    Text(
-                                        text = "Tap the + button to create your first alarm",
-                                        fontSize = 14.sp,
-                                        color = Color.White,
-                                        textAlign = TextAlign.Center,
-                                        modifier = Modifier.padding(bottom = 16.dp)
-                                    )
-                                    Button(
-                                        onClick = {
-                                            // Reset dialog states for new alarm
-                                            selectedDaysState.value = emptySet()
-                                            selectedRingtoneUriState.value = null
-                                            wakeCheckEnabledState.value = false
-                                            wakeCheckMinutesState.value = 5
-                                            protectedAlarmState.value = false
-                                            
-                                            showAddDialog.value = true
-                                        },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = Color(0xFF4285F4)
-                                        )
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Filled.Add,
-                                            contentDescription = null,
-                                            tint = Color.White,
-                                            modifier = Modifier
-                                                .size(18.dp)
-                                                .padding(end = 8.dp)
-                                        )
-                                        Text(
-                                            "Add Your First Alarm",
-                                            color = Color.White
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // Show empty state without any card
                 } else {
                     items(alarms.sortedBy { it.hour * 60 + it.minute }, key = { it.id }) { alarm ->
                         val context = LocalContext.current
@@ -1616,6 +1552,13 @@ fun AlarmScreenContent(
                                 alarmScheduler.cancel(alarmToRemove)
                                 alarmStorage.deleteAlarm(alarmToRemove.id)
                                 alarms.remove(alarmToRemove)
+                                
+                                // CRITICAL FIX: Cancel all possible notifications when alarm is deleted
+                                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                                notificationManager.cancel(alarmToRemove.id)
+                                notificationManager.cancel(com.vaishnava.alarm.Constants.NOTIFICATION_ID_UPCOMING_ALARM)
+                                notificationManager.cancel(2) // Main notification ID
+                                notificationManager.cancel(1001) // Boot receiver notification ID
                             },
                             onToggleEnable = { alarmToToggle, isEnabled ->
                                 // Do not allow toggle while wake-up-check gate is active for this alarm
@@ -1625,6 +1568,7 @@ fun AlarmScreenContent(
                                 val prefs = dpsContext.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
                                 val gateActive = prefs.getBoolean("wakecheck_gate_active_${alarmToToggle.id}", false)
                                 val pending = prefs.getBoolean("wakecheck_pending_${alarmToToggle.id}", false)
+                                
                                 if (gateActive || pending) {
                                     return@AlarmItem
                                 }
@@ -1738,6 +1682,10 @@ fun AlarmScreenContent(
                 // Refresh the alarms list
                 alarms.clear()
                 alarms.addAll(alarmStorage.getAlarms())
+                
+                // CRITICAL FIX: Reset notification tracking and check for upcoming notification after adding alarm
+                (context as MainActivity).resetNotificationTracking()
+                (context as MainActivity).checkAndShowUpcomingAlarmNotification()
             },
             mediaPlayerState = mediaPlayerState,
             showRingtonePicker = showRingtonePicker
@@ -1755,11 +1703,15 @@ fun AlarmScreenContent(
             onDismiss = { showQueueMissionsDialog.value = false },
             onEnqueue = { missionIds ->
                 val mainActivity = context as MainActivity
-                val specs = missionIds.split(",").map { it.trim() }.filter { it.isNotEmpty() }.map { missionId ->
+                val specs = missionIds.split(",").map { it.trim() }.filter { it.isNotEmpty() && it != "none" }.map { missionId ->
+                    // CRITICAL PINPOINT FIX: Never allow "none" in mission params
+                    val safeMissionId = missionId // Allow "none" mission ID
+                    val timeoutMs = if (safeMissionId == "tap") 120000L else 30000L // 2 minutes for tap, 30s for others
+                    Log.d("MainActivity", "MISSION_TIMEOUT_ENQUEUE: missionId=$safeMissionId timeoutMs=$timeoutMs")
                     MissionSpec(
-                        id = missionId,
-                        params = mapOf("mission_type" to missionId),
-                        timeoutMs = 30000L,
+                        id = safeMissionId,
+                        params = mapOf("mission_type" to safeMissionId),
+                        timeoutMs = timeoutMs,
                         retryCount = 3,
                         sticky = true,
                         retryDelayMs = 1000L
@@ -1872,27 +1824,59 @@ fun AlarmItem(
                     style = MaterialTheme.typography.bodySmall,
                     color = Color.White
                 )
+                // Show all indicators on the same line
                 val indicator = remember(alarm.id, alarm.missionType, alarm.missionPassword) {
                     when {
+                        // CRITICAL: Check sequencer first to override single mission logic
+                        alarm.missionType == "sequencer" -> {
+                            // Get mission names from missionPassword field
+                            val missionNames = alarm.missionPassword
+                            if (!missionNames.isNullOrBlank() && missionNames.contains("+")) {
+                                missionNames
+                            } else {
+                                "Seq"
+                            }
+                        }
                         alarm.missionType == "tap" -> "Tap"
                         alarm.missionType == "password" || (alarm.missionPassword?.isNotBlank() == true) -> "Pwd"
                         else -> null
                     }
                 }
-                if (indicator != null) {
-                    Text(
-                        text = indicator,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White
-                    )
-                }
-                if (alarm.isProtected) {
-                    Text(
-                        text = "🛡️ Protected", 
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.White,
-                        fontWeight = FontWeight.Medium
-                    )
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Mission type indicator
+                    if (indicator != null) {
+                        Text(
+                            text = indicator,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White,
+                            maxLines = 1
+                        )
+                    }
+                    
+                    // Protected indicator
+                    if (alarm.isProtected) {
+                        Text(
+                            text = "🛡️", 
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1
+                        )
+                    }
+                    
+                    // Wake-up check indicator
+                    if (alarm.wakeCheckEnabled) {
+                        Image(
+                            painter = painterResource(id = R.raw.wake_check_indicator),
+                            contentDescription = "Wake-up check indicator",
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
                 }
                 
                 // Check and show permission status for enabled alarms
@@ -2027,30 +2011,31 @@ fun AlarmItem(
                 IconButton(
                     onClick = {
                         // Block delete if alarm is protected or wake-up-check is active
-                        if (alarm.isProtected) {
-                            android.widget.Toast.makeText(
-                                context,
-                                "Cannot delete protected alarm",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                            return@IconButton
-                        }
-                        
-                        // Block delete immediately when wake-up-check gate is active or pending
                         val dpsContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                             context.createDeviceProtectedStorageContext() ?: context
                         } else context
                         val prefs = dpsContext.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
                         val gateActive = prefs.getBoolean("wakecheck_gate_active_${alarm.id}", false)
                         val pending = prefs.getBoolean("wakecheck_pending_${alarm.id}", false)
-                        if (gateActive || pending) {
-                            android.widget.Toast.makeText(
-                                context,
-                                "Wake-up check active",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                        } else {
-                            showDeleteConfirm = true
+                        
+                        when {
+                            gateActive || pending -> {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Cannot delete - wake-up check is active",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                            alarm.isProtected -> {
+                                android.widget.Toast.makeText(
+                                    context,
+                                    "Cannot delete protected alarm",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                            else -> {
+                                showDeleteConfirm = true
+                            }
                         }
                     },
                     modifier = Modifier
@@ -2091,6 +2076,10 @@ fun AlarmItem(
             }
 
             if (showEditDialog) {
+            // CRITICAL: Initialize mission type from alarm data for edit dialog
+            val initialMissionType = alarm.missionType ?: ""
+            val safeInitialMissionType = initialMissionType // Allow "none" mission type
+            
             AddAlarmDialog(
                 timeHour = remember { mutableStateOf(alarm.hour) },
                 timeMinute = remember { mutableStateOf(alarm.minute) },
@@ -2103,10 +2092,13 @@ fun AlarmItem(
                 onDismissRequest = { showEditDialog = false },
                 onConfirm = { hour, minute, ringtoneUri, days, missionType, missionPassword, isProtected ->
                     showEditDialog = false
-                    onTimeEdit(alarm, hour, minute, ringtoneUri, days, missionType, missionPassword, isProtected, alarm.wakeCheckEnabled, alarm.wakeCheckMinutes)
+                    // CRITICAL: Never allow "none" mission type from edit dialog
+                    val safeMissionType = missionType // Allow "none" mission type
+                    onTimeEdit(alarm, hour, minute, ringtoneUri, days, safeMissionType, missionPassword, isProtected, alarm.wakeCheckEnabled, alarm.wakeCheckMinutes)
                 },
                 mediaPlayerState = remember { mutableStateOf(null) },
-                showRingtonePicker = remember { mutableStateOf(false) }
+                showRingtonePicker = remember { mutableStateOf(false) },
+                initialMissionType = safeInitialMissionType // Pass safe initial mission type
             )
         }
 
@@ -2127,7 +2119,8 @@ fun AddAlarmDialog(
     onDismissRequest: () -> Unit,
     onConfirm: (Int, Int, Uri?, Set<Int>, String?, String?, Boolean) -> Unit,
     mediaPlayerState: MutableState<MediaPlayer?>,
-    showRingtonePicker: MutableState<Boolean>
+    showRingtonePicker: MutableState<Boolean>,
+    initialMissionType: String = "" // Default to no mission
 ) {
     val context = LocalContext.current
     // Move these calculations inside the Composable so they update correctly
@@ -2142,7 +2135,7 @@ fun AddAlarmDialog(
         isPm.value = timeHour.value >= 12
     }
     // Mission state hoisted so all AlertDialog slots can access
-    val missionTypeState = remember { mutableStateOf("none") }
+    val missionTypeState = remember { mutableStateOf(if (initialMissionType == "none") "" else initialMissionType) } // Use empty string for no mission
     val isQueueMode = remember { mutableStateOf(false) }
     val queuedMissions = remember { mutableStateListOf<String>() }
     
@@ -2518,7 +2511,15 @@ fun AddAlarmDialog(
                         )
                         Switch(
                             checked = isQueueMode.value,
-                            onCheckedChange = { isQueueMode.value = it },
+                            onCheckedChange = { 
+                                isQueueMode.value = it
+                                // Reset mission type state when switching modes
+                                if (it) {
+                                    missionTypeState.value = "password" // Set default for queue mode
+                                } else {
+                                    missionTypeState.value = "" // Reset to empty for single mission mode
+                                }
+                            },
                             colors = SwitchDefaults.colors(
                                 checkedThumbColor = Color.White,
                                 uncheckedThumbColor = Color.White,
@@ -2545,7 +2546,7 @@ fun AddAlarmDialog(
                                 .fillMaxWidth()
                                 .padding(vertical = 8.dp),
                             colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.primaryContainer
+                                containerColor = Color(0xFF1E1E1E) // Dark background to match alarm dialog
                             )
                         ) {
                             Column(
@@ -2555,7 +2556,7 @@ fun AddAlarmDialog(
                                     text = "Mission Queue (${queuedMissions.size})",
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    color = Color.White, // White text to match alarm dialog
                                     modifier = Modifier.padding(bottom = 4.dp)
                                 )
                                 queuedMissions.forEachIndexed { index, mission ->
@@ -2567,7 +2568,7 @@ fun AddAlarmDialog(
                                         Text(
                                             text = "${index + 1}. ${mission.replaceFirstChar { it.uppercase() }}",
                                             fontSize = 12.sp,
-                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            color = Color.White // White text to match alarm dialog
                                         )
                                         IconButton(
                                             onClick = { 
@@ -2580,7 +2581,7 @@ fun AddAlarmDialog(
                                             Icon(
                                                 imageVector = Icons.Filled.Close,
                                                 contentDescription = "Remove",
-                                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                                tint = Color.White, // White icon to match alarm dialog
                                                 modifier = Modifier.size(12.dp)
                                             )
                                         }
@@ -2590,35 +2591,51 @@ fun AddAlarmDialog(
                         }
                     }
                     
-                    // Mission selection buttons for queue
+                    // Mission selection buttons for queue - use same buttons as single mission mode
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         // Password mission
                         OutlinedButton(
                             modifier = Modifier.weight(1f),
                             onClick = { 
-                                queuedMissions.add("password")
+                                if (queuedMissions.size < 5 && !queuedMissions.contains("password")) { // Limit queue size and prevent duplicates
+                                    queuedMissions.add("password")
+                                }
                             },
                             colors = ButtonDefaults.outlinedButtonColors(),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.6f))
                         ) { 
-                            Text("Add Password", fontSize = 10.sp, maxLines = 1) 
+                            AutoSizeText(
+                                text = "Password", 
+                                maxLines = 2, 
+                                modifier = Modifier.fillMaxWidth(), 
+                                minFontSize = 8.sp,
+                                style = MaterialTheme.typography.bodySmall.copy(color = Color.White)
+                            )
                         }
                         
                         // Tap mission
                         OutlinedButton(
                             modifier = Modifier.weight(1f),
                             onClick = { 
-                                queuedMissions.add("tap")
+                                if (queuedMissions.size < 5 && !queuedMissions.contains("tap")) { // Limit queue size and prevent duplicates
+                                    queuedMissions.add("tap")
+                                }
                             },
                             colors = ButtonDefaults.outlinedButtonColors(),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.6f))
                         ) { 
-                            Text("Add Tap", fontSize = 10.sp, maxLines = 1) 
+                            AutoSizeText(
+                                text = "Tap Challenge", 
+                                maxLines = 2, 
+                                modifier = Modifier.fillMaxWidth(), 
+                                minFontSize = 8.sp,
+                                style = MaterialTheme.typography.bodySmall.copy(color = Color.White)
+                            )
                         }
                     }
                     
@@ -2635,28 +2652,11 @@ fun AddAlarmDialog(
                         }
                     }
                 } else {
-                    // Single mission selection
+                    // Single mission selection (without "none" button)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        // None mission
-                        OutlinedButton(
-                            modifier = Modifier.weight(1f),
-                            onClick = { missionTypeState.value = "none" },
-                            colors = ButtonDefaults.outlinedButtonColors(),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                            border = BorderStroke(1.dp, if (missionTypeState.value == "none") Color.White else Color.White.copy(alpha = 0.6f))
-                        ) { 
-                            AutoSizeText(
-                                text = "None", 
-                                maxLines = 2, 
-                                modifier = Modifier.fillMaxWidth(), 
-                                minFontSize = 8.sp,
-                                style = MaterialTheme.typography.bodySmall.copy(color = Color.White)
-                            )
-                        }
-                        
                         // Password mission
                         OutlinedButton(
                             modifier = Modifier.weight(1f),
@@ -2899,8 +2899,12 @@ fun AddAlarmDialog(
                                             }
                                         } else {
                                             // Handle system ringtones
-                                            val ringtone = RingtoneManager.getRingtone(context, selectedRingtoneUriState.value ?: Settings.System.DEFAULT_ALARM_ALERT_URI)
-                                            ringtone?.getTitle(context) ?: "Unknown Ringtone"
+                                            try {
+                                                val ringtone = RingtoneManager.getRingtone(context, selectedRingtoneUriState.value ?: Settings.System.DEFAULT_ALARM_ALERT_URI)
+                                                ringtone?.getTitle(context) ?: "🎵 System Ringtone"
+                                            } catch (e: Exception) {
+                                                "🎵 System Ringtone"
+                                            }
                                         }
                                     } catch (e: Exception) {
                                         // Fallback for any errors
@@ -2940,38 +2944,77 @@ fun AddAlarmDialog(
                         val mainActivity = context as MainActivity
                         Log.d("MainActivity", "QUEUE_MODE_ALARM_CREATE: queuedMissions=${queuedMissions.joinToString(",")}")
                         
-                        val specs = queuedMissions.map { missionId ->
+                        // AUTO-FIX: If only one mission in queue, automatically add the other for proper multi-mission
+                        Log.d("MainActivity", "QUEUE_BEFORE_AUTO_ADD: queuedMissions=${queuedMissions.joinToString(",")}")
+                        if (queuedMissions.size == 1) {
+                            val existingMission = queuedMissions.first()
+                            val missingMission = if (existingMission == "tap") "password" else "tap"
+                            if (!queuedMissions.contains(missingMission)) {
+                                // CRITICAL FIX: Add missing mission while preserving user's selected order
+                                if (existingMission == "tap") {
+                                    // User selected tap first, add password after
+                                    queuedMissions.add("password")
+                                } else {
+                                    // User selected password first, add tap after
+                                    queuedMissions.add("tap")
+                                }
+                                Log.d("MainActivity", "AUTO_ADD_MISSION: Added missing mission while preserving order: ${queuedMissions.joinToString(",")}")
+                            }
+                        }
+                        Log.d("MainActivity", "QUEUE_AFTER_AUTO_ADD: queuedMissions=${queuedMissions.joinToString(",")}")
+                        
+                        val specs = queuedMissions.filter { it != "none" && it.isNotEmpty() }.map { missionId ->
                             Log.d("MainActivity", "CREATING_MISSION_SPEC: missionId=$missionId")
+                            // CRITICAL PINPOINT FIX: Never allow "none" in mission params
+                            val safeMissionId = missionId // Allow "none" mission ID
+                            val timeoutMs = if (safeMissionId == "tap") 105000L else 30000L // 105 seconds for tap to match AlarmActivity, 30s for others
+                            Log.d("MainActivity", "MISSION_TIMEOUT: missionId=$safeMissionId timeoutMs=$timeoutMs")
                             MissionSpec(
-                                id = missionId,
-                                params = mapOf("mission_type" to missionId),
-                                timeoutMs = 30000L,
+                                id = safeMissionId,
+                                params = mapOf("mission_type" to safeMissionId),
+                                timeoutMs = timeoutMs,
                                 retryCount = 3,
                                 sticky = true,
                                 retryDelayMs = 1000L
                             )
                         }
+                        Log.d("MainActivity", "FINAL_MISSION_SPECS: ${specs.map { it.id }.joinToString(",")}")
                         Log.d("MainActivity", "CALLING_ENQUEUE_ALL: specs=${specs.size}")
                         mainActivity.missionSequencer.enqueueAll(specs)
                         
                         // Create alarm with first mission as the primary mission
+                        val primaryMissionType = queuedMissions.first()
+                        Log.d("MainActivity", "QUEUE_MODE_ALARM_CREATE: primaryMissionType=$primaryMissionType queue=${queuedMissions.joinToString(",")}")
+                        
+                        // Create mission names string for display
+                        val missionNames = queuedMissions.map { mission ->
+                            when (mission) {
+                                "tap" -> "Tap"
+                                "password" -> "Pwd"
+                                else -> mission.take(3).capitalize()
+                            }
+                        }.joinToString("+")
+                        
                         onConfirm(
                             timeHour.value,
                             timeMinute.value,
                             selectedRingtoneUriState.value,
                             selectedDaysState.value,
-                            queuedMissions.first(), // First mission as primary
-                            null,
+                            "sequencer", // Use "sequencer" as mission type for multi-mission alarms
+                            missionNames, // Store mission names in missionPassword field for display
                             protectedAlarmState.value
                         )
                     } else {
                         // Handle single mission mode
+                        // CRITICAL: Never allow "none" mission type to be created
+                        val safeMissionType = missionTypeState.value // Allow "none" mission type
+                        Log.d("MainActivity", "SINGLE_MISSION_CREATE: original=${missionTypeState.value} safe=$safeMissionType")
                         onConfirm(
                             timeHour.value,
                             timeMinute.value,
                             selectedRingtoneUriState.value,
                             selectedDaysState.value,
-                            missionTypeState.value,
+                            safeMissionType,
                             null, // Use hardcoded default password
                             protectedAlarmState.value
                         )
@@ -3568,7 +3611,7 @@ fun CustomRingtonePicker(
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(8.dp)
+                        .padding(8.dp)
             ) {
                 Text("Select", color = Color.White)
             }

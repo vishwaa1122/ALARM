@@ -25,7 +25,7 @@ data class Alarm(
 )
 
 fun resolveRingtoneTitle(context: Context, uri: Uri?): String {
-    if (uri == null) return "Unknown Ringtone"
+    if (uri == null) return "🎵 Default Ringtone"
 
     return try {
         val uriString = uri.toString()
@@ -61,8 +61,12 @@ fun resolveRingtoneTitle(context: Context, uri: Uri?): String {
                 }
             }
             else -> {
-                val ringtone = RingtoneManager.getRingtone(context, uri)
-                ringtone?.getTitle(context) ?: "Unknown Ringtone"
+                try {
+                    val ringtone = RingtoneManager.getRingtone(context, uri)
+                    ringtone?.getTitle(context) ?: "🎵 System Ringtone"
+                } catch (e: Exception) {
+                    "🎵 System Ringtone"
+                }
             }
         }
     } catch (_: Exception) {

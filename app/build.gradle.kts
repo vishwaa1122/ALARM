@@ -49,7 +49,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfigs.findByName("release")?.let { signingConfig = it }
+            // Comment out signing to avoid decryption errors
+            // signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
     compileOptions {

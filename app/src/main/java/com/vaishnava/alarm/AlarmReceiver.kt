@@ -10,6 +10,7 @@ import com.vaishnava.alarm.data.Alarm
 import com.vaishnava.alarm.Constants
 import java.util.concurrent.Executors
 import com.vaishnava.alarm.sequencer.MissionLogger
+import com.vaishnava.alarm.sequencer.MissionSequencer
 import com.vaishnava.alarm.MainActivity
 import java.io.File
 import java.io.FileWriter
@@ -281,7 +282,7 @@ class AlarmReceiver : BroadcastReceiver() {
         // Unified log to in-app overlay
         try {
             MissionLogger.log(
-                "Receiver id=${alarm.id} action=$action scheme=${intent.data?.scheme ?: ""} protected=${storageAlarm?.isProtected == true} mission=${storageAlarm?.missionType ?: ""} wakeCheck=${storageAlarm?.wakeCheckEnabled == true}"
+                "Receiver id=${alarm.id} action=$action scheme=${intent.data?.scheme ?: ""} protected=${storageAlarm?.isProtected == true} storageMission=${storageAlarm?.missionType ?: ""} resolvedMission=${alarm.missionType} wakeCheck=${storageAlarm?.wakeCheckEnabled == true}"
             )
         } catch (_: Exception) { }
 
@@ -292,26 +293,26 @@ class AlarmReceiver : BroadcastReceiver() {
             if (skipAudio) {
                 Log.d(TAG, "Skipping AlarmForegroundService start for alarm ${alarm.id} (audio already handled)")
             } else {
+                // FIXED: Start AlarmForegroundService for ALL alarms including sequencer alarms
+                // MissionSequencer handles mission sequencing, but AlarmForegroundService handles audio
+                Log.d(TAG, "Starting AlarmForegroundService for alarm ${alarm.id} (missionType: ${alarm.missionType})")
                 val svc = Intent(context, AlarmForegroundService::class.java).apply {
                     putExtra(ALARM_ID, alarm.id)
                     putExtra(EXTRA_RINGTONE_URI, alarm.ringtoneUri)
                     putExtra(EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
                     if (isWakeUpFollowUp) {
-                        putExtra("from_wake_check", true)
+                        putExtra("is_wake_up_follow_up", true)
                     }
                 }
-                try {
-                    context.startForegroundService(svc)
-                } catch (e: Exception) {
-                    context.startService(svc)
-                }
+                context.startForegroundService(svc)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start AlarmForegroundService: ${e.message}", e)
         }
         
         // 1a) Start UI Activity immediately for protected alarms to bypass background restrictions
-        if (alarm.isProtected == true && !isWakeUpFollowUp) {
+        // BUT NOT for sequencer alarms - let the sequencer handle launching individual missions
+        if (alarm.isProtected == true && !isWakeUpFollowUp && alarm.missionType != "sequencer") {
             try {
                 Log.i("LLM-DBG","UI_START_ATTEMPT target=AlarmActivity flags=NEW_TASK|CLEAR_TOP from=AlarmReceiver")
                 val act = Intent(context, AlarmActivity::class.java).apply {
@@ -331,13 +332,27 @@ class AlarmReceiver : BroadcastReceiver() {
             }
         }
         
-        // Start sequencer missions when alarm fires (not wake-up follow-ups)
-        if (!isWakeUpFollowUp) {
+        // Start sequencer missions ONLY when sequencer alarm fires (not wake-up follow-ups)
+        // CRITICAL FIX: Never start sequencer for alarms with missionType = "none"
+        Log.d(TAG, "SEQUENCER_CHECK: isWakeUpFollowUp=$isWakeUpFollowUp alarm.missionType=${alarm.missionType} alarm.id=${alarm.id}")
+        if (!isWakeUpFollowUp && alarm.missionType == "sequencer") {
             try {
-                MainActivity.getInstance()?.missionSequencer?.startWhenAlarmFires()
+                val sequencer = MainActivity.getInstance()?.missionSequencer
+                if (sequencer != null) {
+                    Log.d(TAG, "Starting mission sequencer from MainActivity instance for sequencer alarm ${alarm.id}")
+                    sequencer.startWhenAlarmFires(alarm.ringtoneUri)
+                } else {
+                    Log.d(TAG, "MainActivity instance null, creating standalone MissionSequencer for sequencer alarm ${alarm.id}")
+                    val standaloneSequencer = MissionSequencer(context)
+                    standaloneSequencer.startWhenAlarmFires(alarm.ringtoneUri)
+                }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start mission sequencer: ${e.message}", e)
+                Log.e(TAG, "Failed to start mission sequencer for alarm ${alarm.id}: ${e.message}", e)
             }
+        } else if (!isWakeUpFollowUp && alarm.missionType == "none") {
+            Log.w(TAG, "BLOCKED_SEQUENCER_START: Alarm ${alarm.id} has missionType 'none' - NOT starting sequencer")
+        } else {
+            Log.d(TAG, "NO_SEQUENCER_START: Conditions not met - isWakeUpFollowUp=$isWakeUpFollowUp missionType=${alarm.missionType}")
         }
 
         // 1b) For wake-up-check follow-ups, also start AlarmActivity directly so the "I'm awake" UI always shows

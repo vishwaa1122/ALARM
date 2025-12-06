@@ -18,6 +18,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.view.KeyEvent
+import com.vaishnava.alarm.sequencer.MissionLogger
 import android.view.WindowManager
 import android.widget.VideoView
 import android.app.AlarmManager
@@ -136,6 +137,7 @@ class AlarmActivity : ComponentActivity() {
     // -------------------- Sequencer Context --------------------
     private var isSequencerMission: Boolean = false
     private var sequencerContext: String = ""
+    private var isSequencerComplete: Boolean = false
 
     // -------------------- TTS --------------------
     private var tts: android.speech.tts.TextToSpeech? = null
@@ -303,6 +305,52 @@ class AlarmActivity : ComponentActivity() {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_OFF -> { /* no-op */ }
                 Intent.ACTION_USER_PRESENT -> { /* no-op */ }
+            }
+        }
+    }
+
+    // -------------------- Finish alarm receiver --------------------
+    private val finishAlarmReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(TAG, "FINISH_ALARM_BROADCAST_RECEIVED: ${intent?.action}")
+            
+            val sequencerComplete = intent?.getBooleanExtra("sequencer_complete", false) ?: false
+            val finishDirectly = intent?.getBooleanExtra("finish_directly", false) ?: false
+            
+            Log.d(TAG, "FINISH_ALARM_PARAMS: sequencerComplete=$sequencerComplete finishDirectly=$finishDirectly")
+            
+            // CRITICAL FIX: Only finish if this is NOT a sequencer mission or if explicitly requested
+            if ((sequencerComplete || finishDirectly) && !isSequencerMission) {
+                Log.d(TAG, "FINISH_ALARM_SEQUENCER_COMPLETE: Finishing activity due to sequencer completion")
+                
+                // Set dismiss flags IMMEDIATELY
+                activityDismissed = true
+                isDismissed = true
+                isSequencerComplete = true
+                
+                // CRITICAL: Finish activity IMMEDIATELY without any delays or conditions
+                try {
+                    Log.d(TAG, "FINISH_ALARM: Force finishing activity immediately")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        finishAndRemoveTask()
+                    } else {
+                        finish()
+                    }
+                    overridePendingTransition(0, 0)
+                    return // Exit immediately
+                } catch (e: Exception) {
+                    Log.e(TAG, "FINISH_ALARM_ERROR: ${e.message}")
+                    try {
+                        finish()
+                        overridePendingTransition(0, 0)
+                    } catch (_: Exception) {}
+                    return // Exit immediately
+                }
+            }
+
+            // For sequencer missions, ignore sequencer_complete broadcasts to allow multi-mission sequences
+            if (sequencerComplete && isSequencerMission) {
+                Log.d(TAG, "FINISH_ALARM_SEQUENCER_IGNORED: Ignoring sequencer_complete broadcast for active sequencer mission")
             }
         }
     }
@@ -485,11 +533,30 @@ class AlarmActivity : ComponentActivity() {
             }
         } catch (_: Exception) {}
 
+        // Register finish alarm receiver for sequencer completion
+        try {
+            val finishFilter = IntentFilter().apply {
+                addAction("com.vaishnava.alarm.FINISH_ALARM")
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(finishAlarmReceiver, finishFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                registerReceiver(finishAlarmReceiver, finishFilter)
+            }
+        } catch (_: Exception) {}
+
         alarmId = intent.getIntExtra(AlarmReceiver.ALARM_ID, -1)
         currentMissionId = intent.getStringExtra("mission_id")
         isWakeCheckLaunchState.value = intent.getBooleanExtra("from_wake_check", false)
         isSequencerMission = intent.getBooleanExtra(com.vaishnava.alarm.sequencer.MissionSequencer.EXTRA_FROM_SEQUENCER, false)
         sequencerContext = intent.getStringExtra("sequencer_context") ?: ""
+        
+        // CRITICAL FIX: Reset sequencer complete flag when starting new sequencer mission
+        if (isSequencerMission) {
+            isSequencerComplete = false
+            Log.d(TAG, "SEQUENCER_RESET: Reset isSequencerComplete for new sequencer mission")
+        }
+        
         Log.d(TAG, "onCreate: alarmId=$alarmId missionId=$currentMissionId isSequencerMission=$isSequencerMission sequencerContext=$sequencerContext fromWakeCheck=${isWakeCheckLaunchState.value}")
         isPreview = intent.getBooleanExtra("preview", false)
         isTestMode = intent.getBooleanExtra("is_test_mode", false)
@@ -525,7 +592,7 @@ class AlarmActivity : ComponentActivity() {
                 // Never default to "none" for sequencer missions - use mission_id as fallback
                 missionType ?: intent?.getStringExtra("mission_id") ?: "unknown"
             } else {
-                alarm?.missionType ?: "none"
+                alarm?.missionType ?: ""
             }
             missionTapEnabled = (persistedMissionType == "tap")
             requiredPassword = when {
@@ -675,6 +742,24 @@ class AlarmActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        
+        // CRITICAL FIX: Only finish if sequencer is complete AND this is NOT an active sequencer mission
+        if (isSequencerComplete && !isSequencerMission) {
+            Log.d(TAG, "ON_RESUME_SEQUENCER_COMPLETE: Finishing activity immediately")
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    finishAndRemoveTask()
+                } else {
+                    finish()
+                }
+                overridePendingTransition(0, 0)
+                return
+            } catch (e: Exception) {
+                try { finish() } catch (_: Exception) {}
+                return
+            }
+        }
+        
         writeSettingsState.value = Settings.System.canWrite(this)
     }
 
@@ -743,15 +828,53 @@ class AlarmActivity : ComponentActivity() {
 
             Log.d(TAG, "onNewIntent: alarmId=$alarmId fromSequencer=$fromSequencer sequencerComplete=$sequencerComplete")
 
-            if (sequencerComplete) {
+            // CRITICAL FIX: Only handle sequencer_complete if this is NOT an active sequencer mission
+            if (sequencerComplete && !isSequencerMission) {
                 Log.d(TAG, "SEQUENCER_COMPLETE: Multi-mission sequence completed, dismissing alarm")
-                dismissAlarm(alarmId)
-                return
+                
+                // CRITICAL: Set dismiss flags IMMEDIATELY to prevent any UI rendering
+                activityDismissed = true
+                isDismissed = true
+                isSequencerComplete = true
+                
+                // CRITICAL: Force finish with finishAndRemoveTask to prevent any restart
+                try {
+                    Log.d(TAG, "SEQUENCER_COMPLETE: Finishing activity with finishAndRemoveTask")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        finishAndRemoveTask()
+                    } else {
+                        finish()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "SEQUENCER_COMPLETE_FINISH_ERROR: ${e.message}")
+                    // Fallback: try regular finish
+                    try {
+                        finish()
+                    } catch (_: Exception) {}
+                }
+                
+                return // Don't process anything else
+            }
+
+            // For sequencer missions, ignore sequencer_complete broadcasts to allow multi-mission sequences
+            if (sequencerComplete && isSequencerMission) {
+                Log.d(TAG, "SEQUENCER_COMPLETE_IGNORED: Ignoring sequencer_complete broadcast for active sequencer mission")
+                return // Don't process anything else
             }
 
             if (fromSequencer) {
                 currentMissionId = intent.getStringExtra("mission_id")
-                Log.d(TAG, "SEQUENCER_MISSION_UPDATE: missionId=$currentMissionId missionType=${intent.getStringExtra("mission_type")}")
+                val missionType = intent.getStringExtra("mission_type")
+                Log.d(TAG, "SEQUENCER_MISSION_UPDATE: missionId=$currentMissionId missionType=$missionType")
+                
+                // CRITICAL FIX: Update mission configuration immediately in onNewIntent
+                missionTapEnabled = (missionType == "tap")
+                this@AlarmActivity.requiredPassword = when {
+                    missionType == "password" -> DEFAULT_GLOBAL_PASSWORD
+                    else -> null // CRITICAL: Clear password for non-password missions
+                }
+                Log.d(TAG, "SEQUENCER_IMMEDIATE_CONFIG: missionType=$missionType missionTapEnabled=$missionTapEnabled requiredPassword=${this@AlarmActivity.requiredPassword != null}")
+                
                 // Flag that we need to reset mission state in the Composable
                 sequencerMissionUpdate = true
             }
@@ -793,6 +916,12 @@ class AlarmActivity : ComponentActivity() {
         writeSettingsGranted: Boolean,
         onOpenWriteSettings: () -> Unit
     ) {
+        // CRITICAL FIX: Only skip rendering if sequencer is complete AND this is NOT an active sequencer mission
+        if (isSequencerComplete && !isSequencerMission) {
+            Log.d(TAG, "AlarmUI: Skipping render for completed sequencer (non-sequencer mission)")
+            return
+        }
+        
         // State
         var missionStarted by remember { mutableStateOf(false) }
         var timerState by remember { mutableStateOf(TimerState.Idle) }
@@ -821,6 +950,15 @@ class AlarmActivity : ComponentActivity() {
                 showPasswordError = false
                 tapCount = 0
                 tapSeconds = 105
+                
+                // CRITICAL FIX: Set initial mission configuration for sequencer missions
+                val missionType = intent?.getStringExtra("mission_type") ?: currentMissionId ?: ""
+                missionTapEnabled = (missionType == "tap")
+                this@AlarmActivity.requiredPassword = when {
+                    missionType == "password" -> DEFAULT_GLOBAL_PASSWORD
+                    else -> null // CRITICAL: Clear password for non-password missions
+                }
+                Log.d(TAG, "INITIAL_SEQUENCER_CONFIG: missionType=$missionType missionTapEnabled=$missionTapEnabled requiredPassword=${this@AlarmActivity.requiredPassword != null}")
             }
         }
 
@@ -834,6 +972,19 @@ class AlarmActivity : ComponentActivity() {
                 showPasswordError = false
                 tapCount = 0
                 tapSeconds = 105
+                
+                // CRITICAL FIX: Refresh mission configuration for new mission
+                val missionType = intent?.getStringExtra("mission_type") ?: currentMissionId ?: ""
+                Log.d(TAG, "SEQUENCER_MISSION_CONFIG: Updating mission config for missionType=$missionType")
+                missionTapEnabled = (missionType == "tap")
+                // Update requiredPassword through the class field (it's a var, not val)
+                this@AlarmActivity.requiredPassword = when {
+                    missionType == "password" -> DEFAULT_GLOBAL_PASSWORD
+                    else -> null // CRITICAL: Clear password for non-password missions
+                }
+                Log.d(TAG, "SEQUENCER_MISSION_CONFIG_UPDATED: missionType=$missionType missionTapEnabled=$missionTapEnabled requiredPassword=${this@AlarmActivity.requiredPassword != null}")
+                Log.d(TAG, "SEQUENCER_MISSION_CONFIG_UPDATED: missionTapEnabled=$missionTapEnabled requiredPassword=${this@AlarmActivity.requiredPassword != null}")
+                
                 sequencerMissionUpdate = false // Reset the flag
             }
         }
@@ -861,19 +1012,7 @@ class AlarmActivity : ComponentActivity() {
         val focusRequester = remember { FocusRequester() }
         val keyboardController = LocalSoftwareKeyboardController.current
 
-        // Title time + subtitle
-        val ringtoneTitle = remember(alarmId, isPreview) {
-            try {
-                if (this@AlarmActivity.isPreview) {
-                    "Preview"
-                } else {
-                    val storage = AlarmStorage(applicationContext)
-                    val alarm = storage.getAlarms().find { it.id == alarmId }
-                    resolveRingtoneTitle(this@AlarmActivity, alarm?.ringtoneUri)
-                }
-            } catch (_: Exception) { if (this@AlarmActivity.isPreview) "Preview" else "Unknown Ringtone" }
-        }
-
+      
         // Get current alarm data for protected status check
         val currentAlarm = remember(alarmId, isPreview) {
             try {
@@ -881,10 +1020,48 @@ class AlarmActivity : ComponentActivity() {
                     null
                 } else {
                     val storage = AlarmStorage(applicationContext)
-                    storage.getAlarms().find { it.id == alarmId }
+                    val foundAlarm = storage.getAlarms().find { it.id == alarmId }
+                    Log.d(TAG, "ALARM_LOAD_DEBUG: alarmId=$alarmId foundAlarm=$foundAlarm ringtoneUri=${foundAlarm?.ringtoneUri}")
+                    foundAlarm
                 }
             } catch (_: Exception) { null }
         }
+
+        // Title time + subtitle
+        val ringtoneTitle = remember(alarmId, isPreview) {
+            try {
+                if (this@AlarmActivity.isPreview) {
+                    "Preview"
+                } else {
+                    // CRITICAL FIX: Use same approach as MainActivity but with fallback for sequencer
+                    val alarmRingtoneUri = currentAlarm?.ringtoneUri
+                    
+                    if (alarmRingtoneUri != null) {
+                        // Use same approach as MainActivity
+                        resolveRingtoneTitle(this@AlarmActivity, alarmRingtoneUri)
+                    } else {
+                        // Fallback for sequencer missions - get ringtone from latest alarm
+                        if (isSequencerMission) {
+                            try {
+                                val alarmStorage = AlarmStorage(applicationContext)
+                                val alarmsWithRingtone = alarmStorage.getAlarms().filter { it.ringtoneUri != null }
+                                val latestAlarmWithRingtone = alarmsWithRingtone.maxByOrNull { it.createdTime }
+                                latestAlarmWithRingtone?.ringtoneUri?.let { uri ->
+                                    resolveRingtoneTitle(this@AlarmActivity, uri)
+                                } ?: "None selected"
+                            } catch (e: Exception) {
+                                "None selected"
+                            }
+                        } else {
+                            "None selected"
+                        }
+                    }
+                }
+            } catch (e: Exception) { 
+                if (this@AlarmActivity.isPreview) "Preview" else "Unknown Ringtone" 
+            }
+        }
+
         val uiNowStr = remember(alarmId) {
             try {
                 val fmt = java.text.SimpleDateFormat("H:mm", java.util.Locale.US)
@@ -1220,11 +1397,20 @@ class AlarmActivity : ComponentActivity() {
             // ===== TAP CHALLENGE (only after Start Mission; only on initial alarm) =====
             if (!isWakeCheck && missionTapEnabledState && missionStarted && !gateActive && !isDismissed) {
                 LaunchedEffect(missionStarted) {
+                    // CRITICAL FIX: Ensure tap missions always start with full 105 seconds in both single and multi-mission
+                    // CRITICAL SEQUENCER FIX: For sequencer missions, ignore timer state and use full time
                     tapSeconds = 105
+                    
+                    // CRITICAL FIX: For sequencer missions, disable timer state to prevent interference with tap timer
+                    if (isSequencerMission) {
+                        timerState = TimerState.Idle
+                    }
+                    
                     while (tapSeconds > 0 && !isDismissed && missionTapEnabledState && missionStarted && !gateActive && !activityDismissed) {
                         delay(1000)
                         tapSeconds -= 1
                     }
+                    
                     if (!isDismissed && missionTapEnabledState && missionStarted && tapCount < 100 && !activityDismissed) {
                         // Timeout -> treat as failed mission and fully dismiss alarm
                         dismissAlarm(alarmId)
@@ -1511,8 +1697,13 @@ class AlarmActivity : ComponentActivity() {
                                     passwordInput = ""
                                     focusRequester.requestFocus()
                                 } else if (passwordInput == actualPassword) {
-                                    // For normal password missions, just dismiss the alarm directly
-                                    dismissAlarm(alarmId)
+                                    // CRITICAL FIX: For sequencer missions, call onMissionCompleted to advance to next mission
+                                    if (isSequencerMission) {
+                                        onMissionCompleted(alarmId)
+                                    } else {
+                                        // For normal password missions, just dismiss the alarm directly
+                                        dismissAlarm(alarmId)
+                                    }
                                 } else {
                                     showPasswordError = true
                                     passwordInput = ""
@@ -1539,7 +1730,7 @@ class AlarmActivity : ComponentActivity() {
             // 3. Always: must not be already dismissed, gate inactive, and tap mission not enabled
             // 4. NEVER show dismiss button during wake-up check
             val isProtectedAlarm = currentAlarm?.isProtected == true
-            val missionTypeIsNone = currentAlarm?.missionType == "none"
+            val missionTypeIsNone = currentAlarm?.missionType == "none" || currentAlarm?.missionType.isNullOrEmpty()
             val hasNoPassword = requiredPassword == null
             val noMissionRequired = !missionTapEnabled && hasNoPassword
 
@@ -1548,13 +1739,13 @@ class AlarmActivity : ComponentActivity() {
             val dismissButtonVisible = when {
                 // Never show dismiss button during wake-up check
                 isWakeCheckLaunchState.value -> false
-                // Never show dismiss button in sequencer mode (multi-mission)
-                isSequencerMission -> false
+                // CRITICAL FIX: NEVER show dismiss button in sequencer mode, even after completion
+                isSequencerMission || isSequencerComplete -> false
                 // If mission type is explicitly "none", show dismiss button
                 missionTypeIsNone && !isDismissed -> true
                 // Protected alarms with "none" mission type
                 isProtectedAlarm && missionTypeIsNone && !gateActive && !isDismissed -> true
-                // Regular alarms with no mission required
+                // Regular alarms with no mission required - FIX: Show dismiss button for single alarms
                 !isProtectedAlarm && noMissionRequired && !gateActive && !isDismissed -> true
                 else -> false
             }
@@ -1697,21 +1888,9 @@ class AlarmActivity : ComponentActivity() {
             }
             sendBroadcast(completionIntent)
 
-            // For sequencer missions, don't dismiss the activity - wait for next mission
-            if (!isSequencerMission) {
-                isDismissed = true
-                activityDismissed = true
-                missionTapEnabled = false
-                try { this@AlarmActivity.runOnUiThread { } } catch (_: Exception) {}
-                // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed
-                try { ttsHandler.removeCallbacksAndMessages(null) } catch (_: Exception) {}
-                try {
-                    tts?.apply {
-                        stop()
-                        shutdown()
-                    }
-                } catch (_: Exception) {}
-            }
+            // CRITICAL FIX: For sequencer missions, NEVER dismiss the activity - wait for next mission
+            // The activity should remain open for the next mission in the sequence
+            Log.d(TAG, "MISSION_COMPLETED_SEQUENCER: Keeping activity open for next mission in sequence")
 
             // For preview mode, just finish immediately without complex dismissal logic
             if (isPreview) {
@@ -2007,6 +2186,9 @@ class AlarmActivity : ComponentActivity() {
         super.onDestroy()
         try { unregisterReceiver(screenReceiver) } catch (e: Exception) {
             // Error unregistering receiver
+        }
+        try { unregisterReceiver(finishAlarmReceiver) } catch (e: Exception) {
+            // Error unregistering finish alarm receiver
         }
         try {
             // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed

@@ -142,7 +142,15 @@ object MissionLogger {
         try {
             val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(now))
             val logFile = File("/sdcard/Download/alarm_debug.log")
-            val writer = FileWriter(logFile, true)
+            
+            // CRITICAL: Clear old log file when basic START_WHEN_ALARM_FIRES logs are detected
+            val shouldClearFile = msg?.contains("BASIC_START_WHEN_ALARM_FIRES") == true
+            val writer = FileWriter(logFile, !shouldClearFile) // Don't append if clearing
+            
+            if (shouldClearFile) {
+                writer.write("=== LOG CLEARED FOR NEW ALARM SESSION ===\n")
+            }
+            
             writer.append("[$timestamp] [SEQUENCER] $line\n")
             writer.close()
         } catch (e: Exception) {

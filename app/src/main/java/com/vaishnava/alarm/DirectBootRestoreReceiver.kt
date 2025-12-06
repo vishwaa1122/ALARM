@@ -186,16 +186,38 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
 
             // Schedule near-term re-ring using only AlarmManager
             val am = actualDpsContext.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-
-            val showIntent: PendingIntent = PendingIntent.getActivity(
-                actualDpsContext,
-                ringId xor 0x0100,
-                Intent(actualDpsContext, AlarmActivity::class.java).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                    putExtra(AlarmReceiver.ALARM_ID, ringId)
-                },
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
+            
+            // Check if this is a sequencer alarm - if so, don't launch AlarmActivity directly
+            val alarm = try {
+                val storage = AlarmStorage(actualDpsContext)
+                storage.getAlarm(ringId)
+            } catch (_: Exception) {
+                null
+            }
+            
+            val showIntent: PendingIntent = if (alarm?.missionType != "sequencer") {
+                PendingIntent.getActivity(
+                    actualDpsContext,
+                    ringId xor 0x0100,
+                    Intent(actualDpsContext, AlarmActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                        putExtra(AlarmReceiver.ALARM_ID, ringId)
+                    },
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            } else {
+                // For sequencer alarms, create a broadcast PendingIntent instead
+                // The MissionSequencer will handle launching the actual missions
+                PendingIntent.getBroadcast(
+                    actualDpsContext,
+                    ringId xor 0x0100,
+                    Intent(actualDpsContext, AlarmReceiver::class.java).apply {
+                        action = "com.vaishnava.alarm.SEQUENCER_MISSED_ALARM"
+                        putExtra(AlarmReceiver.ALARM_ID, ringId)
+                    },
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            }
 
             val fireIntent: PendingIntent = PendingIntent.getBroadcast(
                 actualDpsContext,
