@@ -2988,7 +2988,10 @@ fun AddAlarmDialog(
                         }
                         Log.d("MainActivity", "QUEUE_AFTER_AUTO_ADD: queuedMissions=${queuedMissions.joinToString(",")}")
                         
-                        val specs = queuedMissions.filter { it != "none" && it.isNotEmpty() }.map { missionId ->
+                        // CRITICAL FIX: Respect user's intended order for multi-mission sequences
+                        val orderedMissions = queuedMissions.take(2) // Always respect user order
+                        
+                        val specs = orderedMissions.map { missionId ->
                             Log.d("MainActivity", "CREATING_MISSION_SPEC: missionId=$missionId")
                             // CRITICAL PINPOINT FIX: Never allow "none" in mission params
                             val safeMissionId = missionId // Allow "none" mission ID

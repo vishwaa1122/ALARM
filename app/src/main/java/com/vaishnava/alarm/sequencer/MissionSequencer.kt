@@ -144,35 +144,11 @@ class MissionSequencer(private val context: Context) {
         var queue = queueStore.loadQueue()
         MissionLogger.log("BASIC_QUEUE_CHECK: queueSize=${queue.size}")
         
-        // CRITICAL FIX: Convert "none" missions to tap missions instead of filtering them out
-        val originalSize = queue.size
-        queue = queue.map { mission ->
-            val isNone = mission.id == "none" || 
-                        mission.id.contains("none_mission") || 
-                        mission.id.contains("mission_type=none") ||
-                        mission.params["mission_type"] == "none"
-            if (isNone) {
-                MissionLogger.logWarning("EMERGENCY_CONVERT: Converting 'none' mission to tap - id=${mission.id} params=${mission.params}")
-                // Convert to tap mission instead of removing
-                mission.copy(
-                    id = "tap",
-                    params = mapOf("mission_type" to "tap"),
-                    timeoutMs = mission.timeoutMs
-                )
-            } else {
-                mission
-            }
-        }
-        
-        if (queue.size != originalSize) {
-            MissionLogger.logWarning("EMERGENCY_FILTER: Removed ${originalSize - queue.size} 'none' missions, saving cleaned queue")
-            queueStore.saveQueue(queue)
-        }
-        
         // CRITICAL DEBUG: Log all missions in queue to identify "none" missions
         queue.forEachIndexed { index, mission ->
             MissionLogger.log("QUEUE_MISSION_$index: id=${mission.id} type=${mission.params["mission_type"]} params=${mission.params}")
         }
+        MissionLogger.log("QUEUE_ORDER: First mission=${queue.firstOrNull()?.id} Last mission=${queue.lastOrNull()?.id}")
         
         if (queue.isEmpty()) {
             MissionLogger.logWarning("BASIC_EMPTY_QUEUE: No missions in queue after filtering - this may indicate a completed sequencer alarm")
@@ -402,9 +378,12 @@ class MissionSequencer(private val context: Context) {
 
                 // Remove the mission from the queue when we start it
                 val updatedQueue = queue.toMutableList()
-                updatedQueue.removeAt(0)
+                val missionIndex = updatedQueue.indexOfFirst { it.id == nextMission.id }
+                if (missionIndex != -1) {
+                    updatedQueue.removeAt(missionIndex)
+                }
                 queueStore.saveQueue(updatedQueue)
-                MissionLogger.log("PROCESS_QUEUE_REMOVED_STARTING: missionId=${nextMission.id} remaining=${updatedQueue.size}")
+                MissionLogger.log("PROCESS_QUEUE_REMOVED_STARTING: missionId=${nextMission.id} index=$missionIndex remaining=${updatedQueue.size}")
 
                 // Update state before starting the mission
                 currentMission = nextMission
@@ -566,13 +545,13 @@ class MissionSequencer(private val context: Context) {
     
     private fun startMission(mission: MissionSpec) {
         try {
-            // Convert any "none" mission to password mission immediately
-            val safeMission = if (mission.id == "none" || mission.id.contains("none_mission") || mission.id.contains("mission_type=none")) {
-                MissionLogger.logWarning("NUCLEAR_CONVERT: Converting 'none' mission to password - missionId=${mission.id}")
+            // Convert password missions to use "IfYouWantYouCanSleep" as default password
+            val safeMission = if (mission.id == "password") {
+                MissionLogger.logWarning("PASSWORD_CONVERT: Converting password mission to use default password")
                 mission.copy(
                     id = "password",
-                    params = mapOf("mission_type" to "password"),
-                    timeoutMs = mission.timeoutMs // CRITICAL FIX: Preserve original timeout
+                    params = mapOf("mission_type" to "password", "use_default_password" to "true"),
+                    timeoutMs = mission.timeoutMs
                 )
             } else {
                 mission
@@ -592,11 +571,8 @@ class MissionSequencer(private val context: Context) {
                     val intent = Intent(context, com.vaishnava.alarm.AlarmActivity::class.java).apply {
                         putExtra("mission_id", safeMission.id)
                         // CRITICAL FIX: Always use mission.id as mission_type for consistency (after conversion)
-                        val missionType = when {
-                            safeMission.id == "password" -> "password"
-                            safeMission.id == "tap" -> "tap"
-                            else -> safeMission.params["mission_type"] ?: safeMission.id
-                        }
+                        // CRITICAL FIX: Always use mission.id as mission_type for consistency (after conversion)
+                        val missionType = safeMission.id
                         putExtra("mission_type", missionType)
                         putExtra(EXTRA_FROM_SEQUENCER, true)
                         // CRITICAL FIX: Pass alarm ID and ringtone URI for proper ringtone display
@@ -627,11 +603,7 @@ class MissionSequencer(private val context: Context) {
                         MissionLogger.log("MISSION_INTENT_DEBUG: missionId=${safeMission.id} missionType=$missionType params=${safeMission.params} alarmId=${getCurrentAlarmId()}")
                     }
                     
-                    // Show toast on main thread
-                    withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Starting mission: ${safeMission.id}", Toast.LENGTH_SHORT).show()
-                        context.startActivity(intent)
-                    }
+                    context.startActivity(intent)
                     
                     MissionLogger.log("MISSION_STARTED: missionId=${safeMission.id}")
                     
@@ -648,17 +620,8 @@ class MissionSequencer(private val context: Context) {
     }
     
     private fun startTimeout(mission: MissionSpec, timeoutMs: Long) {
-        // CRITICAL FIX: Convert any "none" mission to password mission immediately
-        val safeMission = if (mission.id == "none" || mission.id.contains("none_mission") || mission.id.contains("mission_type=none")) {
-            MissionLogger.logWarning("TIMEOUT_CONVERTED: Converting 'none' mission to password - missionId=${mission.id}")
-            mission.copy(
-                id = "password",
-                params = mapOf("mission_type" to "password"),
-                timeoutMs = mission.timeoutMs // CRITICAL FIX: Preserve original timeout
-            )
-        } else {
-            mission
-        }
+        // Use mission as-is, no conversion
+        val safeMission = mission
         
         // CRITICAL FIX: Don't start timeout for tap missions - they should wait indefinitely
         if (safeMission.id == "tap") {
@@ -669,11 +632,6 @@ class MissionSequencer(private val context: Context) {
         timeoutJob = scope.launch {
             MissionLogger.log("TIMEOUT_SCHEDULED: missionId=${safeMission.id} timeoutMs=$timeoutMs reason=mission_start_or_resume")
             delay(timeoutMs)
-            
-            // Show Toast to confirm timeout is happening (run on main thread)
-            handler.post {
-                Toast.makeText(context, "Timeout: ${safeMission.id}", Toast.LENGTH_SHORT).show()
-            }
             
             MissionLogger.log("TIMEOUT_FIRED: missionId=${safeMission.id} action=handleMissionCompletion(success=false)")
             handleMissionCompletion(safeMission.id, false)

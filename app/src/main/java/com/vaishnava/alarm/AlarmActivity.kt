@@ -597,6 +597,7 @@ class AlarmActivity : ComponentActivity() {
             missionTapEnabled = (persistedMissionType == "tap")
             requiredPassword = when {
                 missionTapEnabled -> null
+                isSequencerMission && persistedMissionType == "password" -> DEFAULT_GLOBAL_PASSWORD
                 persistedMissionType == "password" ->
                     alarm?.missionPassword?.takeIf { it.isNotBlank() } ?: DEFAULT_GLOBAL_PASSWORD
                 alarm?.missionPassword?.isNotBlank() == true ->
