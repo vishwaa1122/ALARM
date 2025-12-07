@@ -144,17 +144,24 @@ class MissionSequencer(private val context: Context) {
         var queue = queueStore.loadQueue()
         MissionLogger.log("BASIC_QUEUE_CHECK: queueSize=${queue.size}")
         
-        // Filter out ALL "none" missions
+        // CRITICAL FIX: Convert "none" missions to tap missions instead of filtering them out
         val originalSize = queue.size
-        queue = queue.filter { mission ->
+        queue = queue.map { mission ->
             val isNone = mission.id == "none" || 
                         mission.id.contains("none_mission") || 
                         mission.id.contains("mission_type=none") ||
                         mission.params["mission_type"] == "none"
             if (isNone) {
-                MissionLogger.logWarning("EMERGENCY_FILTER: Removing 'none' mission - id=${mission.id} params=${mission.params}")
+                MissionLogger.logWarning("EMERGENCY_CONVERT: Converting 'none' mission to tap - id=${mission.id} params=${mission.params}")
+                // Convert to tap mission instead of removing
+                mission.copy(
+                    id = "tap",
+                    params = mapOf("mission_type" to "tap"),
+                    timeoutMs = mission.timeoutMs
+                )
+            } else {
+                mission
             }
-            !isNone
         }
         
         if (queue.size != originalSize) {
@@ -584,7 +591,7 @@ class MissionSequencer(private val context: Context) {
                 try {
                     val intent = Intent(context, com.vaishnava.alarm.AlarmActivity::class.java).apply {
                         putExtra("mission_id", safeMission.id)
-                        // CRITICAL FIX: Always use mission.id as mission_type for consistency
+                        // CRITICAL FIX: Always use mission.id as mission_type for consistency (after conversion)
                         val missionType = when {
                             safeMission.id == "password" -> "password"
                             safeMission.id == "tap" -> "tap"
@@ -651,6 +658,12 @@ class MissionSequencer(private val context: Context) {
             )
         } else {
             mission
+        }
+        
+        // CRITICAL FIX: Don't start timeout for tap missions - they should wait indefinitely
+        if (safeMission.id == "tap") {
+            MissionLogger.log("TIMEOUT_SKIPPED: missionId=${safeMission.id} - tap missions have no timeout")
+            return
         }
         
         timeoutJob = scope.launch {

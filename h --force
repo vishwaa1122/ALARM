@@ -1,0 +1,899 @@
+}[m
+[32m+[m[41m        [m
+[32m+[m[32m        // CRITICAL DEBUG: Log all missions in queue to identify "none" missions[m
+[32m+[m[32m        queue.forEachIndexed { index, mission ->[m
+[32m+[m[32m            MissionLogger.log("QUEUE_MISSION_$index: id=${mission.id} type=${mission.params["mission_type"]} params=${mission.params}")[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+[32m+[m[32m        if (queue.isEmpty()) {[m
+[32m+[m[32m            MissionLogger.logWarning("BASIC_EMPTY_QUEUE: No missions in queue after filtering - this may indicate a completed sequencer alarm")[m
+[32m+[m[41m            [m
+[32m+[m[32m            // CRITICAL FIX: Disable the sequencer alarm if queue is empty to prevent re-triggering[m
+[32m+[m[32m            try {[m
+[32m+[m[32m                val alarmStorage = com.vaishnava.alarm.AlarmStorage(context)[m
+[32m+[m[32m                val currentAlarmId = getCurrentAlarmId()[m
+[32m+[m[32m                if (currentAlarmId != -1) {[m
+[32m+[m[32m                    alarmStorage.disableAlarm(currentAlarmId)[m
+[32m+[m[32m                    MissionLogger.log("START_WHEN_ALARM_FIRES_DISABLE_ALARM: Disabled sequencer alarm $currentAlarmId due to empty queue")[m
+[32m+[m[41m                    [m
+[32m+[m[32m                    // Also clear the pending intent[m
+[32m+[m[32m                    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager[m
+[32m+[m[32m                    val intent = Intent(context, com.vaishnava.alarm.AlarmReceiver::class.java)[m
+[32m+[m[32m                    val pendingIntent = android.app.PendingIntent.getBroadcast([m
+[32m+[m[32m                        context,[m[41m [m
+[32m+[m[32m                        currentAlarmId,[m[41m [m
+[32m+[m[32m                        intent,[m[41m [m
+[32m+[m[32m                        android.app.PendingIntent.FLAG_NO_CREATE or android.app.PendingIntent.FLAG_IMMUTABLE[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                    if (pendingIntent != null) {[m
+[32m+[m[32m                        alarmManager.cancel(pendingIntent)[m
+[32m+[m[32m                        MissionLogger.log("START_WHEN_ALARM_FIRES_CLEAR_PENDING: Cleared pending intent for alarm $currentAlarmId")[m
+[32m+[m[32m                    }[m
+[32m+[m[32m                }[m
+[32m+[m[32m            } catch (e: Exception) {[m
+[32m+[m[32m                MissionLogger.logError("START_WHEN_ALARM_FIRES_DISABLE_ERROR: Failed to disable alarm - ${e.message}")[m
+[32m+[m[32m            }[m
+[32m+[m[41m            [m
+[32m+[m[32m            // Don't process if queue is empty to prevent false "none" mission issues[m
+[32m+[m[32m            return[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+         processQueue()[m
+     }[m
+     [m
+[36m@@ -142,10 +223,29 @@[m [mclass MissionSequencer(private val context: Context) {[m
+     private suspend fun restoreAndResume() {[m
+         mutex.withLock {[m
+             MissionLogger.log("RESTORE_START: attempting to restore current mission and queue")[m
+[32m+[m[41m            [m
+[32m+[m[32m            // Check if there are any active sequencer alarms[m
+[32m+[m[32m            val alarmStorage = com.vaishnava.alarm.AlarmStorage(context)[m
+[32m+[m[32m            val activeSequencerAlarms = alarmStorage.getAlarms().any { it.missionType == "sequencer" }[m
+[32m+[m[41m            [m
+[32m+[m[32m            if (!activeSequencerAlarms) {[m
+[32m+[m[32m                MissionLogger.log("RESTORE_NO_SEQUENCER_ALARMS: No active sequencer alarms found, clearing mission queue")[m
+[32m+[m[32m                queueStore.clearQueue()[m
+[32m+[m[32m                queueStore.clearCurrentMission()[m
+[32m+[m[32m                return@withLock[m
+[32m+[m[32m            }[m
+[32m+[m[41m            [m
+             val currentMissionData = queueStore.loadCurrentMission()[m
+             if (currentMissionData != null) {[m
+                 val (mission, startTime) = currentMissionData[m
+                 mission?.let { safeMission ->[m
+[32m+[m[32m                    // CRITICAL: Never restore "none" missions from storage[m
+[32m+[m[32m                    if (safeMission.id == "none" || safeMission.id.contains("none_mission") || safeMission.id.contains("mission_type=none")) {[m
+[32m+[m[32m                        MissionLogger.logWarning("RESTORE_BLOCKED: Refusing to restore 'none' mission from storage - missionId=${safeMission.id}")[m
+[32m+[m[32m                        queueStore.clearCurrentMission()[m
+[32m+[m[32m                        return@withLock[m
+[32m+[m[32m                    }[m
+[32m+[m[41m                    [m
+                     val now = System.currentTimeMillis()[m
+                     val elapsed = now - startTime[m
+                     [m
+[36m@@ -156,11 +256,34 @@[m [mclass MissionSequencer(private val context: Context) {[m
+                         startTimeout(safeMission, safeMission.timeoutMs - elapsed)[m
+                     } else {[m
+                         MissionLogger.log("CURRENT_MISSION_TIMEOUT: ${safeMission.id} elapsedMs=$elapsed >= timeoutMs=${safeMission.timeoutMs}")[m
+[32m+[m[32m                        MissionLogger.log("TIMEOUT_RECOVERY: Mission expired, checking queue and potentially disabling sequencer alarm")[m
+[32m+[m[41m                        [m
+                         queueStore.clearCurrentMission()[m
+                         val queue = queueStore.loadQueue().toMutableList()[m
+[32m+[m[41m                        [m
+                         if (queue.isNotEmpty()) {[m
+[31m-                            queue.removeAt(0)[m
+[31m-                            queueStore.saveQueue(queue)[m
+[32m+[m[32m                            // CRITICAL: Filter out any "none" missions from queue during timeout recovery[m
+[32m+[m[32m                            val filteredQueue = queue.filter { mission ->[m
+[32m+[m[32m                                val isNoneMission = mission.id == "none" || mission.id.contains("none_mission") || mission.id.contains("mission_type=none")[m
+[32m+[m[32m                                if (isNoneMission) {[m
+[32m+[m[32m                                    MissionLogger.logWarning("TIMEOUT_QUEUE_FILTER: Removing 'none' mission from queue - missionId=${mission.id}")[m
+[32m+[m[32m                                }[m
+[32m+[m[32m                                !isNoneMission[m
+[32m+[m[32m                            }[m
+[32m+[m[41m                            [m
+[32m+[m[32m                            if (filteredQueue.isEmpty()) {[m
+[32m+[m[32m                                MissionLogger.log("TIMEOUT_RECOVERY_QUEUE_EMPTY: All missions filtered out, disabling sequencer alarm")[m
+[32m+[m[32m                                handleSequencerComplete()[m
+[32m+[m[32m                                return@withLock[m
+[32m+[m[32m                            }[m
+[32m+[m[41m                            [m
+[32m+[m[32m                            queueStore.saveQueue(filteredQueue)[m
+[32m+[m[32m                            MissionLogger.log("TIMEOUT_RECOVERY_QUEUE_UPDATED: removed expired mission, remaining=${filteredQueue.size}")[m
+[32m+[m[32m                            MissionLogger.log("TIMEOUT_RECOVERY_WAITING: Queue has missions, waiting for alarm trigger to continue")[m
+[32m+[m[32m                        } else {[m
+[32m+[m[32m                            MissionLogger.log("TIMEOUT_RECOVERY_QUEUE_EMPTY: No more missions in queue, disabling sequencer alarm")[m
+[32m+[m[32m                            handleSequencerComplete()[m
+[32m+[m[32m                            return@withLock[m
+                         }[m
+                     }[m
+                 }[m
+[36m@@ -170,15 +293,18 @@[m [mclass MissionSequencer(private val context: Context) {[m
+             // Don't auto-start missions when app launches - only when alarm fires[m
+             if (!isProcessing) {[m
+                 MissionLogger.log("RESTORE_NO_AUTO_START: Not auto-starting queue - requires alarm trigger")[m
+[31m-                return@withLock[m
+[31m-            }[m
+[31m-            [m
+[31m-            val queue = queueStore.loadQueue()[m
+[31m-            if (queue.isNotEmpty()) {[m
+[31m-                MissionLogger.log("RESUMING_QUEUE: ${queue.size} missions and current mission processing")[m
+[31m-                startProcessing()[m
+[32m+[m[32m            } else {[m
+[32m+[m[32m                MissionLogger.log("RESTORE_ALREADY_PROCESSING: Current mission is processing, not auto-starting")[m
+             }[m
+         }[m
+[32m+[m[41m        [m
+[32m+[m[32m        // CRITICAL FIX: Don't auto-start queue during restore - wait for alarm trigger[m
+[32m+[m[32m        // This prevents the password page from appearing and quitting immediately[m
+[32m+[m[32m        val queue = queueStore.loadQueue()[m
+[32m+[m[32m        if (queue.isNotEmpty()) {[m
+[32m+[m[32m            MissionLogger.log("RESTORE_QUEUE_EXISTS: ${queue.size} missions in queue, waiting for alarm trigger")[m
+[32m+[m[32m            // Don't call startProcessing() - let the alarm trigger handle it[m
+[32m+[m[32m        }[m
+     }[m
+     [m
+     private suspend fun startProcessing() {[m
+[36m@@ -197,8 +323,20 @@[m [mclass MissionSequencer(private val context: Context) {[m
+         val logTag = "MissionSequencer"[m
+         MissionLogger.log("PROCESS_QUEUE_INTERNAL_ENTRY: isProcessing=$isProcessing, currentMissionId=${currentMission?.id ?: "<none>"}")[m
+         [m
+[32m+[m[32m        // CRITICAL FIX: Don't process if sequencer is complete[m
+[32m+[m[32m        if (isSequencerComplete) {[m
+[32m+[m[32m            MissionLogger.log("PROCESS_QUEUE_INTERNAL_BLOCKED: Sequencer is complete, aborting internal processing")[m
+[32m+[m[32m            return[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+         // Double-check conditions with mutex to prevent race conditions[m
+         mutex.withLock {[m
+[32m+[m[32m            // CRITICAL FIX: Double-check sequencer complete flag inside mutex[m
+[32m+[m[32m            if (isSequencerComplete) {[m
+[32m+[m[32m                MissionLogger.log("PROCESS_QUEUE_INTERNAL_MUTEX_BLOCKED: Sequencer complete detected inside mutex, aborting")[m
+[32m+[m[32m                return@withLock[m
+[32m+[m[32m            }[m
+[32m+[m[41m            [m
+             // If we think we're processing but there's no current mission, fix the state[m
+             if (isProcessing && currentMission == null) {[m
+                 MissionLogger.logWarning("PROCESS_QUEUE_RECOVERY: Found isProcessing=true but no current mission. Resetting state.")[m
+[36m@@ -220,12 +358,30 @@[m [mclass MissionSequencer(private val context: Context) {[m
+             }[m
+             [m
+             try {[m
+[31m-                val queue = queueStore.loadQueue()[m
+[32m+[m[32m                var queue = queueStore.loadQueue()[m
+                 MissionLogger.log("PROCESS_QUEUE_STATE: queueSize=${queue.size}, firstItemId=${queue.firstOrNull()?.id ?: "<none>"}")[m
+                 [m
+[32m+[m[32m                // Filter out ALL "none" missions in processQueue too[m
+[32m+[m[32m                val originalSize = queue.size[m
+[32m+[m[32m                queue = queue.filter { mission ->[m
+[32m+[m[32m                    val isNone = mission.id == "none" ||[m[41m [m
+[32m+[m[32m                                mission.id.contains("none_mission") ||[m[41m [m
+[32m+[m[32m                                mission.id.contains("mission_type=none") ||[m
+[32m+[m[32m                                mission.params["mission_type"] == "none"[m
+[32m+[m[32m                    if (isNone) {[m
+[32m+[m[32m                        MissionLogger.logWarning("PROCESS_QUEUE_FILTER: Removing 'none' mission - id=${mission.id} params=${mission.params}")[m
+[32m+[m[32m                    }[m
+[32m+[m[32m                    !isNone[m
+[32m+[m[32m                }[m
+[32m+[m[41m                [m
+[32m+[m[32m                if (queue.size != originalSize) {[m
+[32m+[m[32m                    MissionLogger.logWarning("PROCESS_QUEUE_FILTER: Removed ${originalSize - queue.size} 'none' missions, saving cleaned queue")[m
+[32m+[m[32m                    queueStore.saveQueue(queue)[m
+[32m+[m[32m                }[m
+[32m+[m[41m                [m
+                 if (queue.isEmpty()) {[m
+                     isProcessing = false[m
+[31m-                    MissionLogger.log("PROCESS_QUEUE_EMPTY: No missions to process")[m
+[32m+[m[32m                    MissionLogger.log("PROCESS_QUEUE_EMPTY: No missions to process after filtering")[m
+                     return@withLock[m
+                 }[m
+ [m
+[36m@@ -237,6 +393,12 @@[m [mclass MissionSequencer(private val context: Context) {[m
+                     return@withLock[m
+                 }[m
+ [m
+[32m+[m[32m                // Remove the mission from the queue when we start it[m
+[32m+[m[32m                val updatedQueue = queue.toMutableList()[m
+[32m+[m[32m                updatedQueue.removeAt(0)[m
+[32m+[m[32m                queueStore.saveQueue(updatedQueue)[m
+[32m+[m[32m                MissionLogger.log("PROCESS_QUEUE_REMOVED_STARTING: missionId=${nextMission.id} remaining=${updatedQueue.size}")[m
+[32m+[m
+                 // Update state before starting the mission[m
+                 currentMission = nextMission[m
+                 isProcessing = true[m
+[36m@@ -248,6 +410,10 @@[m [mclass MissionSequencer(private val context: Context) {[m
+                     MissionLogger.logError("PROCESS_QUEUE_SAVE_ERROR: ${e.message}")[m
+                     currentMission = null[m
+                     isProcessing = false[m
+[32m+[m[32m                    // Restore the mission to the queue on error[m
+[32m+[m[32m                    val restoreQueue = queue.toMutableList()[m
+[32m+[m[32m                    restoreQueue.add(0, nextMission)[m
+[32m+[m[32m                    queueStore.saveQueue(restoreQueue)[m
+                     return@withLock[m
+                 }[m
+                 [m
+[36m@@ -380,6 +546,12 @@[m [mclass MissionSequencer(private val context: Context) {[m
+     }[m
+     [m
+     fun processQueue() {[m
+[32m+[m[32m        // CRITICAL FIX: Don't process queue if sequencer is complete[m
+[32m+[m[32m        if (isSequencerComplete) {[m
+[32m+[m[32m            MissionLogger.log("PROCESS_QUEUE_BLOCKED: Sequencer is complete, not processing queue")[m
+[32m+[m[32m            return[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+         scope.launch {[m
+             processQueueInternal()[m
+         }[m
+[36m@@ -387,46 +559,78 @@[m [mclass MissionSequencer(private val context: Context) {[m
+     [m
+     private fun startMission(mission: MissionSpec) {[m
+         try {[m
+[31m-            // Reject "none" missions completely in multi-mission mode[m
+[31m-            if (mission.id.contains("none_mission") || mission.id.contains("mission_type=none")) {[m
+[31m-                MissionLogger.logWarning("START_MISSION_BLOCKED: Refusing to start 'none' mission in sequencer - missionId=${mission.id}")[m
+[31m-                return[m
+[32m+[m[32m            // Convert any "none" mission to password mission immediately[m
+[32m+[m[32m            val safeMission = if (mission.id == "none" || mission.id.contains("none_mission") || mission.id.contains("mission_type=none")) {[m
+[32m+[m[32m                MissionLogger.logWarning("NUCLEAR_CONVERT: Converting 'none' mission to password - missionId=${mission.id}")[m
+[32m+[m[32m                mission.copy([m
+[32m+[m[32m                    id = "password",[m
+[32m+[m[32m                    params = mapOf("mission_type" to "password"),[m
+[32m+[m[32m                    timeoutMs = mission.timeoutMs // CRITICAL FIX: Preserve original timeout[m
+[32m+[m[32m                )[m
+[32m+[m[32m            } else {[m
+[32m+[m[32m                mission[m
+             }[m
+             [m
+             // Cancel any existing timeout[m
+             timeoutJob?.cancel()[m
+ [m
+[31m-            MissionLogger.log("STARTING_MISSION: ${mission.id}")[m
+[32m+[m[32m            MissionLogger.log("STARTING_MISSION: ${safeMission.id}")[m
+ [m
+             // Start timeout for the mission[m
+[31m-            startTimeout(mission, mission.timeoutMs)[m
+[32m+[m[32m            startTimeout(safeMission, safeMission.timeoutMs)[m
+ [m
+             // Create and launch the mission job[m
+             currentJob = scope.launch {[m
+                 try {[m
+                     val intent = Intent(context, com.vaishnava.alarm.AlarmActivity::class.java).apply {[m
+[31m-                        putExtra("mission_id", mission.id)[m
+[31m-                        putExtra("mission_type", mission.params["mission_type"] ?: mission.id)[m
+[32m+[m[32m                        putExtra("mission_id", safeMission.id)[m
+[32m+[m[32m                        // CRITICAL FIX: Always use mission.id as mission_type for consistency[m
+[32m+[m[32m                        val missionType = when {[m
+[32m+[m[32m                            safeMission.id == "password" -> "password"[m
+[32m+[m[32m                            safeMission.id == "tap" -> "tap"[m
+[32m+[m[32m                            else -> safeMission.params["mission_type"] ?: safeMission.id[m
+[32m+[m[32m                        }[m
+[32m+[m[32m                        putExtra("mission_type", missionType)[m
+                         putExtra(EXTRA_FROM_SEQUENCER, true)[m
+[32m+[m[32m                        // CRITICAL FIX: Pass alarm ID and ringtone URI for proper ringtone display[m
+[32m+[m[32m                        putExtra(AlarmReceiver.ALARM_ID, getCurrentAlarmId())[m
+[32m+[m[32m                        val currentAlarmId = getCurrentAlarmId()[m
+[32m+[m[32m                        if (currentAlarmId != -1) {[m
+[32m+[m[32m                            val alarmStorage = com.vaishnava.alarm.AlarmStorage(context)[m
+[32m+[m[32m                            val alarm = alarmStorage.getAlarms().find { it.id == currentAlarmId }[m
+[32m+[m[41m                            [m
+[32m+[m[32m                            // Use alarm ringtone URI or fallback to original stored URI[m
+[32m+[m[32m                            val ringtoneUri = alarm?.ringtoneUri ?: originalRingtoneUri[m
+[32m+[m[41m                            [m
+[32m+[m[32m                            // CRITICAL FIX: Always pass ringtone URI if available, never skip[m
+[32m+[m[32m                            ringtoneUri?.let { uri ->[m
+[32m+[m[32m                                putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, uri as android.os.Parcelable)[m
+[32m+[m[32m                            }[m
+[32m+[m[32m                        }[m
+[32m+[m[32m                        // CRITICAL FIX: Use same flags as AlarmReceiver for consistent activity launching[m
+                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)[m
+[31m-                        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)[m
+[32m+[m[32m                        addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)[m
+[32m+[m[32m                        addFlags(Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT)[m
+                         addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)[m
+[31m-                        mission.params.forEach { (key, value) ->[m
+[32m+[m[32m                        safeMission.params.forEach { (key, value) ->[m
+                             putExtra(key, value)[m
+                         }[m
+[32m+[m[41m                        [m
+[32m+[m[32m                        // Debug logging for mission type[m
+[32m+[m[32m                        MissionLogger.log("MISSION_INTENT_DEBUG: missionId=${safeMission.id} missionType=$missionType params=${safeMission.params} alarmId=${getCurrentAlarmId()}")[m
+                     }[m
+                     [m
+                     // Show toast on main thread[m
+                     withContext(Dispatchers.Main) {[m
+[31m-                        Toast.makeText(context, "Starting mission: ${mission.id}", Toast.LENGTH_SHORT).show()[m
+[32m+[m[32m                        Toast.makeText(context, "Starting mission: ${safeMission.id}", Toast.LENGTH_SHORT).show()[m
+                         context.startActivity(intent)[m
+                     }[m
+                     [m
+[31m-                    MissionLogger.log("MISSION_STARTED: missionId=${mission.id}")[m
+[32m+[m[32m                    MissionLogger.log("MISSION_STARTED: missionId=${safeMission.id}")[m
+                     [m
+                 } catch (e: Exception) {[m
+                     MissionLogger.logError("MISSION_START_ERROR: ${e.message}")[m
+[31m-                    handleMissionCompletion(mission.id, false)[m
+[32m+[m[32m                    handleMissionCompletion(safeMission.id, false)[m
+                 }[m
+             }[m
+ [m
+[36m@@ -437,17 +641,29 @@[m [mclass MissionSequencer(private val context: Context) {[m
+     }[m
+     [m
+     private fun startTimeout(mission: MissionSpec, timeoutMs: Long) {[m
+[32m+[m[32m        // CRITICAL FIX: Convert any "none" mission to password mission immediately[m
+[32m+[m[32m        val safeMission = if (mission.id == "none" || mission.id.contains("none_mission") || mission.id.contains("mission_type=none")) {[m
+[32m+[m[32m            MissionLogger.logWarning("TIMEOUT_CONVERTED: Converting 'none' mission to password - missionId=${mission.id}")[m
+[32m+[m[32m            mission.copy([m
+[32m+[m[32m                id = "password",[m
+[32m+[m[32m                params = mapOf("mission_type" to "password"),[m
+[32m+[m[32m                timeoutMs = mission.timeoutMs // CRITICAL FIX: Preserve original timeout[m
+[32m+[m[32m            )[m
+[32m+[m[32m        } else {[m
+[32m+[m[32m            mission[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+         timeoutJob = scope.launch {[m
+[31m-            MissionLogger.log("TIMEOUT_SCHEDULED: missionId=${mission.id} timeoutMs=$timeoutMs reason=mission_start_or_resume")[m
+[32m+[m[32m            MissionLogger.log("TIMEOUT_SCHEDULED: missionId=${safeMission.id} timeoutMs=$timeoutMs reason=mission_start_or_resume")[m
+             delay(timeoutMs)[m
+             [m
+             // Show Toast to confirm timeout is happening (run on main thread)[m
+             handler.post {[m
+[31m-                Toast.makeText(context, "Timeout: ${mission.id}", Toast.LENGTH_SHORT).show()[m
+[32m+[m[32m                Toast.makeText(context, "Timeout: ${safeMission.id}", Toast.LENGTH_SHORT).show()[m
+             }[m
+             [m
+[31m-            MissionLogger.log("TIMEOUT_FIRED: missionId=${mission.id} action=handleMissionCompletion(success=false)")[m
+[31m-            handleMissionCompletion(mission.id, false)[m
+[32m+[m[32m            MissionLogger.log("TIMEOUT_FIRED: missionId=${safeMission.id} action=handleMissionCompletion(success=false)")[m
+[32m+[m[32m            handleMissionCompletion(safeMission.id, false)[m
+         }[m
+     }[m
+     [m
+[36m@@ -467,9 +683,24 @@[m [mclass MissionSequencer(private val context: Context) {[m
+                         return@withLock[m
+                     }[m
+                     [m
+[32m+[m[32m                    // CRITICAL FIX: Use resolveMissionId to handle ID mismatches[m
+[32m+[m[32m                    val resolvedMissionId = resolveMissionId(missionId)[m
+[32m+[m[32m                    MissionLogger.log("HANDLE_COMPLETION_RESOLVED: id=$completionId original=$missionId resolved=$resolvedMissionId currentId=$currentId")[m
+[32m+[m[41m                    [m
+                     // Only process if the mission ID matches the current mission[m
+[31m-                    if (missionId != currentId) {[m
+[31m-                        MissionLogger.log("HANDLE_COMPLETION_MISMATCH: id=$completionId missionId=$missionId currentId=$currentId")[m
+[32m+[m[32m                    if (resolvedMissionId != currentId) {[m
+[32m+[m[32m                        MissionLogger.log("HANDLE_COMPLETION_MISMATCH: id=$completionId missionId=$missionId resolved=$resolvedMissionId currentId=$currentId")[m
+[32m+[m[32m                        MissionLogger.log("HANDLE_COMPLETION_DEBUG: missionId length=${missionId?.length} currentId length=${currentId?.length}")[m
+[32m+[m[32m                        MissionLogger.log("HANDLE_COMPLETION_DEBUG: missionId hash=${missionId?.hashCode()} currentId hash=${currentId?.hashCode()}")[m
+[32m+[m[32m                        return@withLock[m
+[32m+[m[32m                    }[m
+[32m+[m[41m                    [m
+[32m+[m[32m                    // CRITICAL FIX: Only complete sequencer if we're not processing any mission and queue is empty[m
+[32m+[m[32m                    if (queueStore.loadQueue().isEmpty() && !isProcessing) {[m
+[32m+[m[32m                        MissionLogger.log("HANDLE_COMPLETION_ALREADY_COMPLETE: id=$completionId missionId=$missionId - Queue empty and not processing, sequencer completed")[m
+[32m+[m[41m                        [m
+[32m+[m[32m                        // CRITICAL: Only call handleSequencerComplete if genuinely no more missions[m
+[32m+[m[32m                        handleSequencerComplete()[m
+                         return@withLock[m
+                     }[m
+                     [m
+[36m@@ -489,14 +720,15 @@[m [mclass MissionSequencer(private val context: Context) {[m
+                         timeoutJob?.cancel()[m
+                         timeoutJob = null[m
+                         [m
+[31m-                        // Load and update the queue[m
+[32m+[m[32m                        // Load the queue (mission already removed when started)[m
+                         val queue = queueStore.loadQueue().toMutableList()[m
+                         MissionLogger.log("ADVANCE_QUEUE_STATE: id=$advanceId size=${queue.size}")[m
+                         [m
+[31m-                        if (queue.isNotEmpty()) {[m
+[31m-                            val removed = queue.removeAt(0)[m
+[32m+[m[32m                        // CRITICAL FIX: Remove completed mission from queue if still present[m
+[32m+[m[32m                        if (queue.isNotEmpty() && queue.any { it.id == currentId }) {[m
+[32m+[m[32m                            queue.removeAll { it.id == currentId }[m
+                             queueStore.saveQueue(queue)[m
+[31m-                            MissionLogger.log("ADVANCE_QUEUE_REMOVED: id=$advanceId missionId=${removed.id} remaining=${queue.size}")[m
+[32m+[m[32m                            MissionLogger.log("ADVANCE_QUEUE_REMOVED_COMPLETED: id=$advanceId removed completed mission=$currentId remaining=${queue.size}")[m
+                         }[m
+                         [m
+                         queueStore.clearCurrentMission()[m
+[36m@@ -504,35 +736,73 @@[m [mclass MissionSequencer(private val context: Context) {[m
+                         [m
+                         if (queue.isEmpty()) {[m
+                             MissionLogger.log("ADVANCE_QUEUE_EMPTY: id=$advanceId - Multi-mission sequence completed")[m
+[31m-                            // Dismiss the alarm activity when all missions are completed[m
+[31m-                            scope.launch {[m
+[31m-                                withContext(Dispatchers.Main) {[m
+[31m-                                    try {[m
+[31m-                                        val dismissIntent = Intent(context, com.vaishnava.alarm.AlarmActivity::class.java).apply {[m
+[31m-                                            putExtra("sequencer_complete", true)[m
+[31m-                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)[m
+[31m-                                            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)[m
+[31m-                                        }[m
+[31m-                                        context.startActivity(dismissIntent)[m
+[31m-                                    } catch (e: Exception) {[m
+[31m-                                        MissionLogger.logError("SEQUENCER_COMPLETE_ERROR: Failed to dismiss activity - ${e.message}")[m
+[31m-                                    }[m
+[31m-                                }[m
+[31m-                            }[m
+[32m+[m[32m                            handleSequencerComplete()[m
+                         } else {[m
+                             MissionLogger.log("ADVANCE_QUEUE_NEXT: id=$advanceId remaining=${queue.size}")[m
+[31m-                            // Start next mission immediately within the same lock[m
+[32m+[m[32m                            // Start next mission with a small delay to prevent black screen race condition[m
+                             val nextMission = queue.first()[m
+                             MissionLogger.log("ADVANCE_QUEUE_STARTING_NEXT: id=$advanceId nextMissionId=${nextMission.id} nextMissionType=${nextMission.params["mission_type"]}")[m
+[32m+[m[41m                            [m
+[32m+[m[32m                            // CRITICAL FIX: Block "none" missions from being started in success path[m
+[32m+[m[32m                            if (nextMission.id == "none" || nextMission.id.contains("none_mission") || nextMission.id.contains("mission_type=none")) {[m
+[32m+[m[32m                                MissionLogger.logWarning("ADVANCE_QUEUE_BLOCKED_NONE: Blocking 'none' mission from starting - missionId=${nextMission.id}")[m
+[32m+[m[41m                                [m
+[32m+[m[32m                                // Remove the "none" mission from queue and continue with next[m
+[32m+[m[32m                                val updatedQueue = queue.toMutableList()[m
+[32m+[m[32m                                updatedQueue.removeAt(0)[m
+[32m+[m[32m                                queueStore.saveQueue(updatedQueue)[m
+[32m+[m[32m                                MissionLogger.log("ADVANCE_QUEUE_REMOVED_NONE: removed 'none' mission, remaining=${updatedQueue.size}")[m
+[32m+[m[41m                                [m
+[32m+[m[32m                                // Try to start the next mission after removing "none"[m
+[32m+[m[32m                                if (updatedQueue.isNotEmpty()) {[m
+[32m+[m[32m                                    val afterNoneMission = updatedQueue.first()[m
+[32m+[m[32m                                    MissionLogger.log("ADVANCE_QUEUE_AFTER_NONE: starting mission after 'none' - missionId=${afterNoneMission.id}")[m
+[32m+[m[41m                                    [m
+[32m+[m[32m                                    // Remove that mission too and start it[m
+[32m+[m[32m                                    val finalQueue = updatedQueue.toMutableList()[m
+[32m+[m[32m                                    finalQueue.removeAt(0)[m
+[32m+[m[32m                                    queueStore.saveQueue(finalQueue)[m
+[32m+[m[41m                                    [m
+[32m+[m[32m                                    currentMission = afterNoneMission[m
+[32m+[m[32m                                    isProcessing = true[m
+[32m+[m[41m                                    [m
+[32m+[m[32m                                    scope.launch {[m
+[32m+[m[32m                                        delay(300)[m
+[32m+[m[32m                                        startMission(afterNoneMission)[m
+[32m+[m[32m                                    }[m
+[32m+[m[32m                                } else {[m
+[32m+[m[32m                                    MissionLogger.log("ADVANCE_QUEUE_EMPTY_AFTER_NONE: No more missions after removing 'none', completing sequencer")[m
+[32m+[m[32m                                    handleSequencerComplete()[m
+[32m+[m[32m                                }[m
+[32m+[m[32m                                return@withLock[m
+[32m+[m[32m                            }[m
+[32m+[m[41m                            [m
+[32m+[m[32m                            // CRITICAL FIX: Remove the next mission from queue before starting it[m
+[32m+[m[32m                            val updatedQueue = queue.toMutableList()[m
+[32m+[m[32m                            updatedQueue.removeAt(0)[m
+[32m+[m[32m                            queueStore.saveQueue(updatedQueue)[m
+[32m+[m[32m                            MissionLogger.log("ADVANCE_QUEUE_REMOVED_NEXT: id=$advanceId removedMissionId=${nextMission.id} remaining=${updatedQueue.size}")[m
+[32m+[m[41m                            [m
+                             currentMission = nextMission[m
+                             isProcessing = true[m
+[31m-                            startMission(nextMission)[m
+[32m+[m[41m                            [m
+[32m+[m[32m                            // Launch next mission with delay to prevent activity state conflicts[m
+[32m+[m[32m                            scope.launch {[m
+[32m+[m[32m                                delay(300) // 300ms delay to ensure proper activity cleanup[m
+[32m+[m[32m                                startMission(nextMission)[m
+[32m+[m[32m                            }[m
+                         }[m
+                     } else {[m
+                         MissionLogger.log("HANDLE_COMPLETION_FAILURE: id=$completionId missionId=$missionId")[m
+[31m-                        currentMission = null[m
+[31m-                        queueStore.clearCurrentMission()[m
+[31m-                        ensureQueueContinues()[m
+[32m+[m[32m                        // For failure, don't auto-advance - wait for manual completion[m
+[32m+[m[32m                        MissionLogger.log("HANDLE_COMPLETION_FAILURE_WAIT: Mission $missionId failed, waiting for manual completion")[m
+[32m+[m[41m                        [m
+[32m+[m[32m                        // Keep current mission state for manual completion[m
+[32m+[m[32m                        timeoutJob?.cancel()[m
+[32m+[m[32m                        timeoutJob = null[m
+[32m+[m[41m                        [m
+[32m+[m[32m                        // Don't clear current mission or advance queue - wait for manual completion[m
+[32m+[m[32m                        MissionLogger.log("HANDLE_COMPLETION_FAILURE_STATE_KEPT: missionId=$missionId currentMission kept for manual completion")[m
+                     }[m
+                 }[m
+             } catch (e: Exception) {[m
+[36m@@ -544,29 +814,101 @@[m [mclass MissionSequencer(private val context: Context) {[m
+         }[m
+     }[m
+     [m
+[31m-    private fun resolveMissionId(missionId: String): String {[m
+[31m-        // Enhanced resolution logic with multiple fallback sources[m
+[31m-        if (missionId.isNotBlank() && missionId != "unknown_mission") {[m
+[31m-            MissionLogger.log("RESOLVE_MISSION_ID_DIRECT: usingProvidedId=$missionId")[m
+[31m-            return missionId[m
+[32m+[m[32m    private fun handleSequencerComplete() {[m
+[32m+[m[32m        MissionLogger.log("SEQUENCER_COMPLETE: Multi-mission sequence completed")[m
+[32m+[m[41m        [m
+[32m+[m[32m        // Set sequencer complete flag to prevent duplicate completions[m
+[32m+[m[32m        isSequencerComplete = true[m
+[32m+[m[41m        [m
+[32m+[m[32m        // Disable the original sequencer alarm to prevent re-triggering[m
+[32m+[m[32m        try {[m
+[32m+[m[32m            val alarmStorage = com.vaishnava.alarm.AlarmStorage(context)[m
+[32m+[m[32m            val currentAlarmId = getCurrentAlarmId()[m
+[32m+[m[32m            if (currentAlarmId != -1) {[m
+[32m+[m[32m                alarmStorage.disableAlarm(currentAlarmId)[m
+[32m+[m[32m                MissionLogger.log("SEQUENCER_COMPLETE_ALARM_DISABLED: disabled original alarm $currentAlarmId")[m
+[32m+[m[41m                [m
+[32m+[m[32m                // Additional: Ensure alarm is completely disabled by clearing the specific alarm intent[m
+[32m+[m[32m                val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager[m
+[32m+[m[32m                val intent = Intent(context, com.vaishnava.alarm.AlarmReceiver::class.java)[m
+[32m+[m[32m                val pendingIntent = android.app.PendingIntent.getBroadcast([m
+[32m+[m[32m                    context,[m[41m [m
+[32m+[m[32m                    currentAlarmId,[m[41m [m
+[32m+[m[32m                    intent,[m[41m [m
+[32m+[m[32m                    android.app.PendingIntent.FLAG_NO_CREATE or android.app.PendingIntent.FLAG_IMMUTABLE[m
+[32m+[m[32m                )[m
+[32m+[m[32m                if (pendingIntent != null) {[m
+[32m+[m[32m                    alarmManager.cancel(pendingIntent)[m
+[32m+[m[32m                    MissionLogger.log("SEQUENCER_COMPLETE_PENDING_INTENT_CLEARED: cleared pending intent for alarm $currentAlarmId")[m
+[32m+[m[32m                }[m
+[32m+[m[32m            } else {[m
+[32m+[m[32m                MissionLogger.logWarning("SEQUENCER_COMPLETE_NO_ALARM_ID: could not get current alarm id")[m
+[32m+[m[32m            }[m
+[32m+[m[32m        } catch (e: Exception) {[m
+[32m+[m[32m            MissionLogger.logError("SEQUENCER_COMPLETE_ALARM_DISABLE_ERROR: ${e.message}")[m
+         }[m
+[31m-[m
+[31m-        // Try to get from current mission first[m
+[31m-        currentMission?.let {[m
+[31m-            MissionLogger.log("RESOLVE_MISSION_ID_FROM_CURRENT: currentMissionId=${it.id}")[m
+[31m-            return it.id[m
+[32m+[m[41m        [m
+[32m+[m[32m        // Clear all sequencer state[m
+[32m+[m[32m        try {[m
+[32m+[m[32m            currentMission = null[m
+[32m+[m[32m            isProcessing = false[m
+[32m+[m[32m            currentJob = null[m
+[32m+[m[32m            timeoutJob = null[m
+[32m+[m[32m            queueStore.clearQueue()[m
+[32m+[m[32m            queueStore.clearCurrentMission()[m
+[32m+[m[32m            MissionLogger.log("SEQUENCER_COMPLETE_STATE_CLEARED: All sequencer state cleared")[m
+[32m+[m[32m        } catch (e: Exception) {[m
+[32m+[m[32m            MissionLogger.logError("SEQUENCER_COMPLETE_STATE_CLEAR_ERROR: ${e.message}")[m
+         }[m
+[31m-[m
+[31m-        // Then fall back to the front of the queue (if any)[m
+[31m-        val queue = queueStore.loadQueue()[m
+[31m-        if (queue.isNotEmpty()) {[m
+[31m-            val id = queue.first().id[m
+[31m-            MissionLogger.log("RESOLVE_MISSION_ID_FROM_QUEUE_FRONT: frontMissionId=$id")[m
+[31m-            return id[m
+[32m+[m[41m        [m
+[32m+[m[32m        // Dismiss the alarm activity when all missions are completed[m
+[32m+[m[32m        scope.launch {[m
+[32m+[m[32m            delay(0) // Minimal delay for immediate response[m
+[32m+[m[32m            withContext(Dispatchers.Main) {[m
+[32m+[m[32m                try {[m
+[32m+[m[32m                    MissionLogger.log("SEQUENCER_COMPLETE_DISMISS: Sending finish broadcast to dismiss current activity")[m
+[32m+[m[41m                    [m
+[32m+[m[32m                    // CRITICAL FIX: ONLY send finish broadcast - NO direct activity start to prevent flashing[m
+[32m+[m[32m                    val finishIntent = Intent("com.vaishnava.alarm.FINISH_ALARM")[m
+[32m+[m[32m                    finishIntent.putExtra("sequencer_complete", true)[m
+[32m+[m[32m                    finishIntent.putExtra("finish_directly", true)[m
+[32m+[m[32m                    context.sendBroadcast(finishIntent)[m
+[32m+[m[32m                    MissionLogger.log("SEQUENCER_COMPLETE_FINISH_BROADCAST: Finish broadcast sent")[m
+[32m+[m[41m                    [m
+[32m+[m[32m                    // IMMEDIATE: Stop alarm service[m
+[32m+[m[32m                    try {[m
+[32m+[m[32m                        val serviceIntent = Intent(context, com.vaishnava.alarm.AlarmForegroundService::class.java).apply {[m
+[32m+[m[32m                            action = "com.vaishnava.alarm.STOP_ALARM_SERVICE"[m
+[32m+[m[32m                        }[m
+[32m+[m[32m                        context.startService(serviceIntent)[m
+[32m+[m[32m                        MissionLogger.log("SEQUENCER_COMPLETE_SERVICE_STOP: Service stopped immediately")[m
+[32m+[m[32m                    } catch (e: Exception) {[m
+[32m+[m[32m                        MissionLogger.logError("SEQUENCER_COMPLETE_SERVICE_STOP_ERROR: ${e.message}")[m
+[32m+[m[32m                    }[m
+[32m+[m[41m                    [m
+[32m+[m[32m                    MissionLogger.log("SEQUENCER_COMPLETE_DONE: Sequencer completed with broadcast only")[m
+[32m+[m[41m                    [m
+[32m+[m[32m                } catch (e: Exception) {[m
+[32m+[m[32m                    MissionLogger.logError("SEQUENCER_COMPLETE_ERROR: Failed to complete sequencer - ${e.message}")[m
+[32m+[m[32m                }[m
+[32m+[m[32m            }[m
+         }[m
+[31m-[m
+[31m-        MissionLogger.log("RESOLVE_MISSION_ID_FALLBACK: returningOriginal=$missionId")[m
+[31m-        return missionId // Return original as last resort[m
+[32m+[m[32m    }[m
+[32m+[m[41m    [m
+[32m+[m[32m    private fun resolveMissionId(missionId: String): String {[m
+[32m+[m[32m        // ABSOLUTE: No fallbacks for multi-mission - require explicit mission ID[m
+[32m+[m[32m        if (missionId.isBlank()) {[m
+[32m+[m[32m            MissionLogger.logError("RESOLVE_MISSION_ID_BLANK: Mission ID is blank - multi-mission requires explicit ID")[m
+[32m+[m[32m            throw IllegalStateException("Multi-mission requires explicit mission ID, no fallbacks allowed")[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+[32m+[m[32m        if (missionId == "none") {[m
+[32m+[m[32m            MissionLogger.logError("RESOLVE_MISSION_ID_NONE: Mission ID is 'none' - not allowed in multi-mission")[m
+[32m+[m[32m            throw IllegalStateException("Multi-mission cannot use 'none' mission ID")[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+[32m+[m[32m        MissionLogger.log("RESOLVE_MISSION_ID_DIRECT: usingProvidedId=$missionId")[m
+[32m+[m[32m        return missionId[m
+     }[m
+     [m
+     private suspend fun handleMissionFailure(missionId: String) {[m
+[36m@@ -574,76 +916,26 @@[m [mclass MissionSequencer(private val context: Context) {[m
+             val mission = currentMission[m
+             if (mission == null) {[m
+                 MissionLogger.logWarning("FAIL_HANDLER_NULL_MISSION: missionId=$missionId")[m
+[31m-                ensureQueueContinues()[m
+                 return[m
+             }[m
+             [m
+             MissionLogger.log("FAIL: missionId=$missionId sticky=${mission.sticky} retryCount=${mission.retryCount} retryDelayMs=${mission.retryDelayMs}")[m
+             [m
+[31m-            if (mission.sticky && mission.retryCount > 0) {[m
+[31m-                val retrySpec = mission.copy([m
+[31m-                    retryCount = mission.retryCount - 1,[m
+[31m-                    retryDelayMs = (mission.retryDelayMs * 2.0).toLong()[m
+[31m-                )[m
+[31m-                [m
+[31m-                MissionLogger.log("RETRY_SCHEDULED: missionId=$missionId retriesLeft=${retrySpec.retryCount} nextDelayMs=${retrySpec.retryDelayMs}")[m
+[31m-                [m
+[31m-                currentJob = scope.launch {[m
+[31m-                    MissionLogger.log("RETRY_DELAY_WAIT: missionId=$missionId delayMs=${retrySpec.retryDelayMs}")[m
+[31m-                    delay(retrySpec.retryDelayMs)[m
+[31m-                    mutex.withLock {[m
+[31m-                        val queue = queueStore.loadQueue().toMutableList()[m
+[31m-                        MissionLogger.log("RETRY_QUEUE_STATE_BEFORE: missionId=$missionId queueSize=${queue.size}")[m
+[31m-                        if (queue.isNotEmpty()) {[m
+[31m-                            queue[0] = retrySpec[m
+[31m-                            queueStore.saveQueue(queue)[m
+[31m-                            currentMission = retrySpec[m
+[31m-                            MissionLogger.log("RETRY_QUEUE_UPDATED: missionId=$missionId newRetryCount=${retrySpec.retryCount}")[m
+[31m-                            startMission(retrySpec)[m
+[31m-                        } else {[m
+[31m-                            MissionLogger.logWarning("RETRY_ABORT: queue empty when scheduling retry for missionId=$missionId")[m
+[31m-                        }[m
+[31m-                    }[m
+[31m-                }[m
+[31m-            } else {[m
+[31m-                MissionLogger.log("DEQUEUE_NO_RETRY: missionId=$missionId (no more retries or not sticky)")[m
+[31m-                // Inline advanceQueue logic to maintain synchronization[m
+[31m-                val advanceId = "${System.currentTimeMillis()}_${(0..9999).random()}"[m
+[31m-                MissionLogger.log("ADVANCE_QUEUE_START: id=$advanceId")[m
+[31m-                [m
+[31m-                // Clear current mission state[m
+[31m-                currentMission = null[m
+[31m-                isProcessing = false[m
+[31m-                currentJob = null[m
+[31m-                timeoutJob?.cancel()[m
+[31m-                timeoutJob = null[m
+[31m-                [m
+[31m-                // Load and update the queue[m
+[31m-                val queue = queueStore.loadQueue().toMutableList()[m
+[31m-                MissionLogger.log("ADVANCE_QUEUE_STATE: id=$advanceId size=${queue.size}")[m
+[31m-                [m
+[31m-                if (queue.isNotEmpty()) {[m
+[31m-                    val removed = queue.removeAt(0)[m
+[31m-                    queueStore.saveQueue(queue)[m
+[31m-                    MissionLogger.log("ADVANCE_QUEUE_REMOVED: id=$advanceId missionId=${removed.id}")[m
+[31m-                }[m
+[31m-                [m
+[31m-                queueStore.clearCurrentMission()[m
+[31m-                MissionLogger.log("ADVANCE_QUEUE_CLEANUP_DONE: id=$advanceId")[m
+[31m-                [m
+[31m-                if (queue.isEmpty()) {[m
+[31m-                    MissionLogger.log("ADVANCE_QUEUE_EMPTY: id=$advanceId")[m
+[31m-                } else {[m
+[31m-                    MissionLogger.log("ADVANCE_QUEUE_NEXT: id=$advanceId remaining=${queue.size}")[m
+[31m-                    // Schedule next mission processing[m
+[31m-                    scope.launch {[m
+[31m-                        ensureQueueContinues()[m
+[31m-                    }[m
+[31m-                }[m
+[31m-            }[m
+[32m+[m[32m            // CRITICAL FIX: Don't auto-retry or advance on failure - wait for manual completion[m
+[32m+[m[32m            // This allows the user to complete the mission manually after timeout[m
+[32m+[m[32m            MissionLogger.log("FAILURE_WAIT_MANUAL: Mission $missionId failed, waiting for manual completion")[m
+[32m+[m[41m            [m
+[32m+[m[32m            // Keep current mission state so manual completion can be processed[m
+[32m+[m[32m            // DON'T clear currentMission[m
+[32m+[m[32m            // DON'T set isProcessing = false[m
+[32m+[m[32m            // Just cancel the timeout job and wait for manual completion[m
+[32m+[m[32m            timeoutJob?.cancel()[m
+[32m+[m[32m            timeoutJob = null[m
+[32m+[m[41m            [m
+[32m+[m[32m            MissionLogger.log("FAILURE_MANUAL_WAIT: Waiting for user to complete mission $missionId manually (currentMission kept)")[m
+[32m+[m[41m            [m
+         } catch (e: Exception) {[m
+             MissionLogger.logError("Error handling mission failure for $missionId")[m
+[31m-            ensureQueueContinues()[m
+         }[m
+     }[m
+     [m
+[36m@@ -653,41 +945,41 @@[m [mclass MissionSequencer(private val context: Context) {[m
+      * semantics when called from within mutex.withLock.[m
+      */[m
+     private fun ensureQueueContinues() {[m
+[32m+[m[32m        // CRITICAL FIX: Don't continue queue if sequencer is complete[m
+[32m+[m[32m        if (isSequencerComplete) {[m
+[32m+[m[32m            MissionLogger.log("ENSURE_QUEUE_BLOCKED: Sequencer is complete, not continuing queue")[m
+[32m+[m[32m            return[m
+[32m+[m[32m        }[m
+[32m+[m[41m        [m
+         scope.launch {[m
+             try {[m
+[31m-                MissionLogger.log("ENSURE_QUEUE_CONTINUES_START: isProcessing=${'$'}isProcessing currentMissionId=${'$'}{currentMission?.id}")[m
+[32m+[m[32m                MissionLogger.log("ENSURE_QUEUE_CONTINUES_START: isProcessing=$isProcessing currentMissionId=${currentMission?.id}")[m
+                 [m
+                 // Check if we should process the queue[m
+                 val shouldProcess = !isProcessing && currentMission == null[m
+[31m-                MissionLogger.log("ENSURE_QUEUE_CHECK: shouldProcess=${'$'}shouldProcess (isProcessing=${'$'}isProcessing, currentMission=${'$'}{currentMission?.id})")[m
+[32m+[m[32m                MissionLogger.log("ENSURE_QUEUE_CHECK: shouldProcess=$shouldProcess (isProcessing=$isProcessing, currentMission=${currentMission?.id})")[m
+                 [m
+                 if (!shouldProcess) {[m
+                     val currentId = currentMission?.id ?: "<none>"[m
+[31m-                    MissionLogger.log("ENSURE_QUEUE_SKIPPED: Already processing mission ${'$'}currentId")[m
+[32m+[m[32m                    MissionLogger.log("ENSURE_QUEUE_SKIP: Already processing or has current mission ($currentId)")[m
+                     return@launch[m
+                 }[m
+                 [m
+[31m-                // Small delay to ensure any pending state changes are complete[m
+[31m-                delay(50)[m
+[31m-                [m
+[31m-                // Double-check conditions after delay[m
+[31m-                if (isProcessing || currentMission != null) {[m
+[31m-                    MissionLogger.log("ENSURE_QUEUE_ABORT: State changed during delay")[m
+[32m+[m[32m                // Double-check sequencer complete flag after delay[m
+[32m+[m[32m                if (isSequencerComplete) {[m
+[32m+[m[32m                    MissionLogger.log("ENSURE_QUEUE_ABORT: Sequencer complete detected, aborting queue continuation")[m
+                     return@launch[m
+                 }[m
+                 [m
+[31m-                MissionLogger.log("ENSURE_QUEUE_PROCESSING: Starting processQueueInternal")[m
+[32m+[m[32m                MissionLogger.log("ENSURE_QUEUE_PROCESS: Starting queue processing")[m
+                 processQueueInternal()[m
+                 [m
+             } catch (e: Exception) {[m
+[31m-                MissionLogger.logError("ENSURE_QUEUE_ERROR: ${'$'}{e.message}")[m
+[31m-                // Reset state and retry[m
+[31m-                isProcessing = false[m
+[31m-                currentMission = null[m
+[32m+[m[32m                MissionLogger.logError("ENSURE_QUEUE_ERROR: ${e.message}")[m
+                 [m
+                 // Schedule a retry with backoff[m
+                 val retryDelay = 500L[m
+[31m-                MissionLogger.log("ENSURE_QUEUE_RETRY: Scheduling retry in ${'$'}retryDelay ms")[m
+[32m+[m[32m                MissionLogger.log("ENSURE_QUEUE_RETRY: Scheduling retry in $retryDelay ms")[m
+                 delay(retryDelay)[m
+                 ensureQueueContinues()[m
+             }[m
+[36m@@ -711,6 +1003,27 @@[m [mclass MissionSequencer(private val context: Context) {[m
+         return size[m
+     }[m
+     [m
+[32m+[m[32m    fun getQueueStore(): MissionQueueStore = queueStore[m
+[32m+[m[41m    [m
+[32m+[m[32m    private fun getCurrentAlarmId(): Int {[m
+[32m+[m[32m        // Try to get the current alarm ID from the current mission parameters[m
+[32m+[m[32m        currentMission?.params?.get("alarm_id")?.let { return it.toIntOrNull() ?: -1 }[m
+[32m+[m[41m        [m
+[32m+[m[32m        // Try to get it from the current mission file[m
+[32m+[m[32m        try {[m
+[32m+[m[32m            val current = queueStore.loadCurrentMission()[m
+[32m+[m[32m            current?.first?.params?.get("alarm_id")?.let { return it.toIntOrNull() ?: -1 }[m
+[32m+[m[32m        } catch (_: Exception) { }[m
+[32m+[m[41m        [m
+[32m+[m[32m        // Fallback: try to get it from shared preferences or other storage[m
+[32m+[m[32m        return try {[m
+[32m+[m[32m            val prefs = context.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)[m
+[32m+[m[32m            prefs.getInt("current_service_alarm_id", -1)[m
+[32m+[m[32m        } catch (_: Exception) {[m
+[32m+[m[32m            -1[m
+[32m+[m[32m        }[m
+[32m+[m[32m    }[m
+[32m+[m[41m    [m
+     fun destroy() {[m
+         try {[m
+             context.unregisterReceiver(missionCompletionReceiver)[m
+[1mdiff --git a/app/src/main/res/raw/wake_check_indicator.png b/app/src/main/res/raw/wake_check_indicator.png[m
+[1mnew file mode 100644[m
+[1mindex 0000000..8b6dc7c[m
+Binary files /dev/null and b/app/src/main/res/raw/wake_check_indicator.png differ
+[1mdiff --git a/test_dps_fix.md b/test_dps_fix.md[m
+[1mnew file mode 100644[m
+[1mindex 0000000..cd3544b[m
+[1m--- /dev/null[m
+[1m+++ b/test_dps_fix.md[m
+[36m@@ -0,0 +1,98 @@[m
+[32m+[m[32m# DPS Alarm Fix + Missed Alarm Recovery[m
+[32m+[m
+[32m+[m[32m## Problem 1: DPS Issue[m
+[32m+[m[32mIf alarm was set for 16:45 and phone restarted at 16:44 while locked, the alarm wouldn't fire at 16:45.[m
+[32m+[m
+[32m+[m[32m## Problem 2: Missed Alarm Issue[m[41m  [m
+[32m+[m[32mIf alarm was set for 16:55 and phone was off from 16:44 to 17:00, the alarm wouldn't fire when device turned on.[m
+[32m+[m
+[32m+[m[32m## Solution Added[m
+[32m+[m
+[32m+[m[32m### 1. DPS Fix (Original Request)[m
+[32m+[m[32mModified `DirectBootRestoreReceiver` to reschedule all future alarms during locked boot, not just restore actively ringing alarms.[m
+[32m+[m
+[32m+[m[32m### 2. Missed Alarm Recovery (New Feature)[m
+[32m+[m[32mAdded `checkAndFireMissedAlarms()` function to `BootReceiver` that:[m
+[32m+[m[32m- Detects alarms missed in the last 30 minutes when device was off[m
+[32m+[m[32m- Fires missed alarms immediately when device boots up[m
+[32m+[m[32m- Only fires alarms missed by 1-30 minutes (to avoid very old alarms)[m
+[32m+[m
+[32m+[m[32m## Test Steps[m
+[32m+[m
+[32m+[m[32m### DPS Fix Test:[m
+[32m+[m[32m1. Set an alarm for 2 minutes from now (e.g., if current time is 16:43, set for 16:45)[m
+[32m+[m[32m2. Restart the phone at 16:44 (before the alarm time)[m
+[32m+[m[32m3. Keep phone locked (don't unlock)[m
+[32m+[m[32m4. Wait until 16:45[m
+[32m+[m[32m5. **Alarm should fire**[m[41m [m
+[32m+[m
+[32m+[m[32m### Missed Alarm Recovery Test:[m
+[32m+[m[32m1. Set an alarm for 16:55[m
+[32m+[m[32m2. Turn phone completely OFF at 16:44[m
+[32m+[m[32m3. Turn phone ON at 17:00[m
+[32m+[m[32m4. **Alarm should fire immediately** when device boots[m[41m [m
+[32m+[m
+[32m+[m[32m### Edge Case Test (Same Time Boot):[m
+[32m+[m[32m1. Set an alarm for 16:55[m
+[32m+[m[32m2. Turn phone completely OFF before 16:55[m
+[32m+[m[32m3. Turn phone ON exactly at 16:55[m
+[32m+[m[32m4. **Alarm should fire immediately** when device boots (now handled)[m[41m [m
+[32m+[m
+[32m+[m[32m## Key Changes[m
+[32m+[m
+[32m+[m[32m### DirectBootRestoreReceiver:[m
+[32m+[m[32m- Added `rescheduleAllAlarmsInLockedMode()` function[m
+[32m+[m[32m- Reads all enabled alarms from Device Protected Storage during locked boot[m
+[32m+[m[32m- Schedules alarms that will fire within next 24 hours[m
+[32m+[m[32m- Added `checkAndFireMissedAlarms()` function[m
+[32m+[m[32m- Detects alarms missed in last 30 minutes[m
+[32m+[m[32m- Fires missed alarms immediately on boot[m
+[32m+[m
+[32m+[m[32m### BootReceiver:[m
+[32m+[m[32m- No changes (missed alarm logic moved to DirectBootRestoreReceiver for immediate execution)[m
+[32m+[m
+[32m+[m[32m### AlarmReceiver:[m
+[32m+[m[32m- Added handler for `MISSED_ALARM_IMMEDIATE` action[m
+[32m+[m[32m- Processes missed alarms as normal alarm triggers[m
+[32m+[m
+[32m+[m[32m## Expected Logs[m
+[32m+[m
+[32m+[m[32m### DPS Fix:[m
+[32m+[m[32m```[m
+[32m+[m[32m=== DPS LOCKED BOOT RESCHEDULE START ===[m
+[32m+[m[32mFound X alarms in DPS storage[m
+[32m+[m[32mDPS Alarm: ID=Y, Enabled=true, Time=HH:MM[m
+[32m+[m[32m SCHEDULED DPS Alarm ID Y for HH:MM (in Z minutes)[m
+[32m+[m[32m=== DPS LOCKED BOOT RESCHEDULE COMPLETE: X alarms scheduled ===[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m### Missed Alarm Recovery:[m
+[32m+[m[32m```[m
+[32m+[m[32m=== MISSED ALARM CHECK START ===[m
+[32m+[m[32m🔔 MISSED ALARM: ID=Y, Time=HH:MM, Missed by=Z minutes, Next in=W minutes[m
+[32m+[m[32m🚨 FIRING MISSED ALARM ID=Y immediately[m
+[32m+[m[32m✅ Missed alarm ID=Y triggered immediately[m
+[32m+[m[32m=== MISSED ALARM CHECK COMPLETE: Fired X missed alarms ===[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m**Note**: Smart dual ringing prevention is now implemented:[m
+[32m+[m[32m```[m
+[32m+[m[32m🚫 DUAL PREVENTION: Alarm ID=123 was scheduled for future and next in 3 minutes, preventing dual ringing[m
+[32m+[m[32m✅ MISSED ALARM ALLOWED: ID=456 was scheduled for future but next in 15 minutes (>5), allowing missed alarm[m
+[32m+[m[32m⏭️ NOT MISSED: ID=789, Not in missed window (missed by=X minutes)[m
+[32m+[m[32m⏭️ SKIPPING MISSED ALARM: ID=101, Missed by=X minutes but next alarm is in Y minutes (prevents dual ringing)[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m**Logic**: Only prevents dual ringing when alarm was scheduled for near future (≤5 minutes). Allows missed alarms if next occurrence is far enough away.[m
+[32m+[m
+[32m+[m[32m**Dual Audio Fix**: Missed alarms now use single audio source:[m
+[32m+[m[32m- Primary: AlarmForegroundService (handles all audio)[m
+[32m+[m[32m- Backup: AlarmReceiver with `skip_audio=true` flag (no duplicate audio)[m
+[32m+[m[32m- Result: Only one ringtone plays (no default + selected ringtone)[m
+[32m+[m
+[32m+[m[32m## Verification[m
+[32m+[m[32m-  DPS alarms fire at correct time even if phone remains locked[m
+[32m+[m[32m-  Missed alarms fire immediately when device turns on[m
+[32m+[m[32m-  Existing reboot ring functionality preserved[m
+[32m+[m[32m-  No duplicate alarms scheduled[m
+[32m+[m[32m-  Only alarms missed by 1-30 minutes fire (avoiding very old alarms)[m

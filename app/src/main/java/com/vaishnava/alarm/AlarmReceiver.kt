@@ -342,9 +342,18 @@ class AlarmReceiver : BroadcastReceiver() {
                     Log.d(TAG, "Starting mission sequencer from MainActivity instance for sequencer alarm ${alarm.id}")
                     sequencer.startWhenAlarmFires(alarm.ringtoneUri)
                 } else {
-                    Log.d(TAG, "MainActivity instance null, creating standalone MissionSequencer for sequencer alarm ${alarm.id}")
-                    val standaloneSequencer = MissionSequencer(context)
-                    standaloneSequencer.startWhenAlarmFires(alarm.ringtoneUri)
+                    Log.d(TAG, "MainActivity instance null, starting MainActivity for sequencer alarm ${alarm.id}")
+                    
+                    // Simple approach: Just start MainActivity and let it handle the sequencer
+                    val mainActivityIntent = Intent(context, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        putExtra("sequencer_alarm_id", alarm.id)
+                        putExtra("sequencer_ringtone_uri", alarm.ringtoneUri.toString())
+                        putExtra("auto_start_sequencer", true)
+                    }
+                    
+                    context.startActivity(mainActivityIntent)
+                    Log.d(TAG, "MainActivity started for sequencer alarm ${alarm.id}")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start mission sequencer for alarm ${alarm.id}: ${e.message}", e)

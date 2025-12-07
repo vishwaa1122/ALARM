@@ -165,4 +165,8 @@ class MissionQueueStore(private val context: Context) {
             MissionLogger.logError("Failed to clear current mission", e)
         }
     }
+    
+    fun getQueueFilePath(): String {
+        return queueFile.absolutePath
+    }
 }

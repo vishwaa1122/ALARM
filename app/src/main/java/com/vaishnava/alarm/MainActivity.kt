@@ -241,6 +241,31 @@ class MainActivity : BaseActivity() {
         // Set static instance for AlarmActivity access
         instance = this
         
+        // CRITICAL FIX: Check if MainActivity was launched from sequencer alarm notification
+        val sequencerAlarmId = intent.getIntExtra("sequencer_alarm_id", -1)
+        val sequencerRingtoneUri = intent.getStringExtra("sequencer_ringtone_uri")
+        val autoStartSequencer = intent.getBooleanExtra("auto_start_sequencer", false)
+        
+        if (sequencerAlarmId != -1 && sequencerRingtoneUri != null) {
+            addSequencerLog("MainActivity launched from sequencer alarm notification: alarmId=$sequencerAlarmId")
+            
+            if (autoStartSequencer) {
+                addSequencerLog("Auto-start sequencer requested, starting immediately")
+                // Auto-start the sequencer after a short delay to ensure initialization
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    try {
+                        val ringtoneUri = android.net.Uri.parse(sequencerRingtoneUri)
+                        missionSequencer.startWhenAlarmFires(ringtoneUri)
+                        addSequencerLog("Auto-start sequencer completed successfully")
+                    } catch (e: Exception) {
+                        addSequencerLog("Auto-start sequencer failed: ${e.message}")
+                    }
+                }, 500) // 500ms delay for proper initialization
+            } else {
+                addSequencerLog("Sequencer already running, MainActivity synchronized")
+            }
+        }
+        
         // Start in-app log capture
         addSequencerLog("MissionSequencer initialized")
         addSequencerLog("Queue size: ${missionSequencer.getQueueSize()}")
