@@ -591,15 +591,19 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                 try {
                     Log.d("AlarmApp", " FIRING MISSED ALARM ID=${alarm.id} immediately")
                     
-                    // ONLY start the AlarmForegroundService (don't send broadcast to prevent dual audio)
-                    val svc = Intent(context, AlarmForegroundService::class.java).apply {
-                        putExtra(AlarmReceiver.ALARM_ID, alarm.id)
-                        putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri) // CRITICAL: Pass the correct ringtone URI
-                        putExtra("is_missed_alarm", true)
-                    }
-                    try {
-                        // Check if service is already running for this alarm to prevent duplicate starts
+                    if (alarm.missionType == "sequencer") {
+                        // For sequencer alarms, use AlarmForegroundService like single alarms
+                        // The service will handle rebuilding the mission queue
+                        Log.d("AlarmApp", "Using AlarmForegroundService for missed sequencer alarm ID=${alarm.id}")
+                        val svc = Intent(context, AlarmForegroundService::class.java).apply {
+                            putExtra(AlarmReceiver.ALARM_ID, alarm.id)
+                            putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri)
+                            putExtra("is_missed_alarm", true)
+                            putExtra("is_sequencer_missed_alarm", true) // Special flag for sequencer missed alarms
+                        }
+                        
                         try {
+                            // Check if service is already running for this alarm to prevent duplicate starts
                             val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                                 context.createDeviceProtectedStorageContext()
                             } else {
@@ -609,33 +613,62 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                             val currentServiceAlarmId = prefs.getInt("current_service_alarm_id", -1)
                             
                             if (currentServiceAlarmId == alarm.id) {
-                                Log.d("AlarmApp", "AlarmForegroundService already running for missed alarm ID=${alarm.id}, skipping service start")
+                                Log.d("AlarmApp", "AlarmForegroundService already running for missed sequencer alarm ID=${alarm.id}, skipping service start")
                             } else {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                     context.startForegroundService(svc)
                                 } else {
                                     context.startService(svc)
                                 }
-                                Log.d("AlarmApp", "Started AlarmForegroundService for missed alarm ID=${alarm.id} (audio only)")
+                                Log.d("AlarmApp", "Started AlarmForegroundService unstoppable for missed sequ; will auto-stop after all missions complete ID=${alarm.id}")
                             }
                         } catch (e: Exception) {
-                            // Fallback: try starting service anyway
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                context.startForegroundService(svc)
-                            } else {
-                                context.startService(svc)
-                            }
-                            Log.d("AlarmApp", "Started AlarmForegroundService for missed alarm ID=${alarm.id} (fallback)")
+                            Log.e("AlarmApp", "Failed to start AlarmForegroundService for missed sequencer alarm ID=${alarm.id}: ${e.message}")
                         }
-                    } catch (e: Exception) {
-                        Log.e("AlarmApp", "Failed to start AlarmForegroundService for missed alarm ID=${alarm.id}: ${e.message}")
+                    } else {
+                        // For non-sequencer alarms, use the regular AlarmForegroundService
+                        val svc = Intent(context, AlarmForegroundService::class.java).apply {
+                            putExtra(AlarmReceiver.ALARM_ID, alarm.id)
+                            putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri) // CRITICAL: Pass the correct ringtone URI
+                            putExtra("is_missed_alarm", true)
+                        }
+                        try {
+                            // Check if service is already running for this alarm to prevent duplicate starts
+                            try {
+                                val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                    context.createDeviceProtectedStorageContext()
+                                } else {
+                                    context
+                                }
+                                val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                                val currentServiceAlarmId = prefs.getInt("current_service_alarm_id", -1)
+                                
+                                if (currentServiceAlarmId == alarm.id) {
+                                    Log.d("AlarmApp", "AlarmForegroundService already running for missed alarm ID=${alarm.id}, skipping service start")
+                                } else {
+                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                        context.startForegroundService(svc)
+                                    } else {
+                                        context.startService(svc)
+                                    }
+                                    Log.d("AlarmApp", "Started AlarmForegroundService for missed alarm ID=${alarm.id} (audio only)")
+                                }
+                            } catch (e: Exception) {
+                                Log.e("AlarmApp", "Failed to check current service alarm ID for missed alarm ID=${alarm.id}: ${e.message}")
+                                // Fallback: try starting service anyway
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                    context.startForegroundService(svc)
+                                } else {
+                                    context.startService(svc)
+                                }
+                                Log.d("AlarmApp", "Fallback: Started AlarmForegroundService for missed alarm ID=${alarm.id}")
+                            }
+                        } catch (e: Exception) {
+                            Log.e("AlarmApp", "Failed to start AlarmForegroundService for missed alarm ID=${alarm.id}: ${e.message}")
+                        }
                     }
-                    
-                    // CRITICAL FIX: Remove backup trigger to prevent any chance of dual audio
-                    // The primary AlarmForegroundService start is sufficient
-                    Log.d("AlarmApp", "✅ Missed alarm ID=${alarm.id} triggered with single audio source (no backup)")
                 } catch (e: Exception) {
-                    Log.e("AlarmApp", " Failed to fire missed alarm ID=${alarm.id}: ${e.message}")
+                    Log.e("AlarmApp", "Failed to process missed alarm ID=${alarm.id}: ${e.message}")
                 }
             }
             

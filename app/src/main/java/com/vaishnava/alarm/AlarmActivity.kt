@@ -138,6 +138,7 @@ class AlarmActivity : ComponentActivity() {
     private var isSequencerMission: Boolean = false
     private var sequencerContext: String = ""
     private var isSequencerComplete: Boolean = false
+    private var isMissedAlarm: Boolean = false
 
     // -------------------- TTS --------------------
     private var tts: android.speech.tts.TextToSpeech? = null
@@ -550,6 +551,7 @@ class AlarmActivity : ComponentActivity() {
         isWakeCheckLaunchState.value = intent.getBooleanExtra("from_wake_check", false)
         isSequencerMission = intent.getBooleanExtra(com.vaishnava.alarm.sequencer.MissionSequencer.EXTRA_FROM_SEQUENCER, false)
         sequencerContext = intent.getStringExtra("sequencer_context") ?: ""
+        isMissedAlarm = intent.getBooleanExtra("is_missed_alarm", false)
         
         // CRITICAL FIX: Reset sequencer complete flag when starting new sequencer mission
         if (isSequencerMission) {
@@ -590,18 +592,19 @@ class AlarmActivity : ComponentActivity() {
                 val missionType = intent?.getStringExtra("mission_type")
                 val missionId = intent?.getStringExtra("mission_id")
                 
-                // If mission info is missing from notification press, get it from MissionSequencer
-                if (missionType == null && sequencerContext == "notification_press") {
+                // If mission info is missing for sequencer missions (notification press, missed alarm, force restart, etc.), get it from MissionSequencer
+                if (missionType == null && isSequencerMission) {
                     try {
                         val mainActivity = MainActivity.getInstance()
                         val sequencer = mainActivity?.missionSequencer
                         val currentMission = sequencer?.getCurrentMission()
                         
                         if (currentMission != null) {
+                            val actualMissionType = currentMission.params["mission_type"] ?: currentMission.id
                             intent?.putExtra("mission_id", currentMission.id)
-                            intent?.putExtra("mission_type", currentMission.id)
+                            intent?.putExtra("mission_type", actualMissionType)
                             currentMissionId = currentMission.id
-                            currentMission.id
+                            actualMissionType
                         } else {
                             missionId ?: "unknown"
                         }

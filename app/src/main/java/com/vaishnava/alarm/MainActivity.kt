@@ -95,6 +95,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import com.vaishnava.alarm.ui.AutoSizeText
 import androidx.compose.material3.TextButton
+import androidx.lifecycle.lifecycleScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -245,6 +246,15 @@ class MainActivity : BaseActivity() {
         val sequencerAlarmId = intent.getIntExtra("sequencer_alarm_id", -1)
         val sequencerRingtoneUri = intent.getStringExtra("sequencer_ringtone_uri")
         val autoStartSequencer = intent.getBooleanExtra("auto_start_sequencer", false)
+        
+        // Check if launched from missed sequencer alarm
+        val fromMissedSequencerAlarm = intent.getBooleanExtra("from_missed_sequencer_alarm", false)
+        val missedSequencerAlarmId = intent.getIntExtra(AlarmReceiver.ALARM_ID, -1)
+        
+        if (fromMissedSequencerAlarm && missedSequencerAlarmId != -1) {
+            addSequencerLog("MainActivity launched from missed sequencer alarm: alarmId=$missedSequencerAlarmId")
+            addSequencerLog("Sequencer missed alarm is now handled by AlarmForegroundService")
+        }
         
         if (sequencerAlarmId != -1 && sequencerRingtoneUri != null) {
             addSequencerLog("MainActivity launched from sequencer alarm notification: alarmId=$sequencerAlarmId")

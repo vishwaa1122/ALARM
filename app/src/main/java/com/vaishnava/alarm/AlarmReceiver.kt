@@ -129,6 +129,74 @@ class AlarmReceiver : BroadcastReceiver() {
                     // Continue with normal alarm processing - this will be handled as regular alarm
                 }
             }
+            "com.vaishnava.alarm.SEQUENCER_MISSED_ALARM" -> {
+                Log.d(TAG, "Processing sequencer missed alarm for alarm $alarmId")
+                // For sequencer missed alarms, start the MissionSequencer directly
+                try {
+                    val mainActivity = MainActivity.getInstance()
+                    val sequencer = mainActivity?.missionSequencer
+                    if (sequencer != null && mainActivity != null) {
+                        // Get the alarm details to rebuild the mission queue
+                        val alarmStorage = com.vaishnava.alarm.AlarmStorage(context)
+                        val alarm = alarmStorage.getAlarm(alarmId)
+                        if (alarm != null && alarm.missionType == "sequencer") {
+                            Log.d(TAG, "Rebuilding mission queue for missed sequencer alarm: alarmId=$alarmId")
+                            
+                            // Parse mission names from missionPassword field (e.g., "Tap+Pwd")
+                            val missionNames = alarm.missionPassword ?: ""
+                            val missionIds = missionNames.split("+").map { it.trim().lowercase() }
+                                .map { mission ->
+                                    when (mission) {
+                                        "tap" -> "tap"
+                                        "pwd", "password" -> "password"
+                                        else -> mission
+                                    }
+                                }
+                                .filter { it.isNotEmpty() && it != "none" }
+                            
+                            Log.d(TAG, "Parsed mission IDs from alarm: $missionIds")
+                            
+                            // Create mission specs from the parsed mission IDs
+                            val specs = missionIds.map { missionId ->
+                                val safeMissionId = missionId
+                                val timeoutMs = if (safeMissionId == "tap") 105000L else 30000L
+                                Log.d(TAG, "Creating mission spec: $safeMissionId (timeout: $timeoutMs)")
+                                com.vaishnava.alarm.sequencer.MissionSpec(
+                                    id = safeMissionId,
+                                    params = mapOf("mission_type" to safeMissionId),
+                                    timeoutMs = timeoutMs,
+                                    retryCount = 3,
+                                    sticky = true,
+                                    retryDelayMs = 1000L
+                                )
+                            }
+                            
+                            // Enqueue all missions first
+                            sequencer.enqueueAll(specs)
+                            Log.d(TAG, "Enqueued ${specs.size} missions for missed alarm")
+                            
+                            // Then start the sequencer
+                            sequencer.startWhenAlarmFires(alarm.ringtoneUri)
+                            Log.d(TAG, "Started sequencer for missed alarm: alarmId=$alarmId")
+                        } else {
+                            Log.w(TAG, "Invalid alarm for missed sequencer: alarmId=$alarmId, missionType=${alarm?.missionType}")
+                        }
+                    } else {
+                        Log.w(TAG, "MissionSequencer not available for missed alarm $alarmId, starting MainActivity first")
+                        // Start MainActivity to initialize MissionSequencer
+                        val mainIntent = Intent(context, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                            putExtra("from_missed_sequencer_alarm", true)
+                            putExtra(AlarmReceiver.ALARM_ID, alarmId)
+                        }
+                        context.startActivity(mainIntent)
+                        Log.d(TAG, "Started MainActivity for missed sequencer alarm $alarmId")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error starting sequencer for missed alarm $alarmId", e)
+                }
+                return
+            }
         }
 
         // allow multiple action names used in app

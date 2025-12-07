@@ -444,6 +444,7 @@ class AlarmForegroundService : Service() {
         // Extract extras and update state
         isWakeCheckLaunch = intent?.getBooleanExtra("from_wake_check", false) == true
         isMissedAlarm = intent?.getBooleanExtra("is_missed_alarm", false) == true
+        val isSequencerMissedAlarm = intent?.getBooleanExtra("is_sequencer_missed_alarm", false) == true
 
         // Check if this is a DPS auto-launch scenario (no activity shown yet)
         if (alarmId != -1 && !isWakeCheckLaunch && !isMissedAlarm) {
@@ -593,6 +594,62 @@ class AlarmForegroundService : Service() {
 
         // Turn screen on
         turnScreenOn()
+
+        // Handle sequencer missed alarms by rebuilding the mission queue
+        if (isSequencerMissedAlarm) {
+            android.util.Log.d(TAG, "Handling sequencer missed alarm: rebuilding mission queue for alarmId=$currentAlarmId")
+            try {
+                val alarm = alarmStorage.getAlarm(currentAlarmId)
+                if (alarm != null && alarm.missionType == "sequencer") {
+                    // Parse mission names from missionPassword field (e.g., "Tap+Pwd")
+                    val missionNames = alarm.missionPassword ?: ""
+                    val missionIds = missionNames.split("+").map { it.trim().lowercase() }
+                        .map { mission ->
+                            when (mission) {
+                                "tap" -> "tap"
+                                "pwd", "password" -> "password"
+                                else -> mission
+                            }
+                        }
+                        .filter { it.isNotEmpty() && it != "none" }
+                    
+                    android.util.Log.d(TAG, "Parsed mission IDs for sequencer missed alarm: $missionIds")
+                    
+                    // Create mission specs from the parsed mission IDs
+                    val specs = missionIds.map { missionId ->
+                        val safeMissionId = missionId
+                        val timeoutMs = if (safeMissionId == "tap") 105000L else 30000L
+                        android.util.Log.d(TAG, "Creating mission spec for sequencer missed alarm: $safeMissionId (timeout: $timeoutMs)")
+                        com.vaishnava.alarm.sequencer.MissionSpec(
+                            id = safeMissionId,
+                            params = mapOf("mission_type" to safeMissionId),
+                            timeoutMs = timeoutMs,
+                            retryCount = 3,
+                            sticky = true,
+                            retryDelayMs = 1000L
+                        )
+                    }
+                    
+                    // Get MainActivity and enqueue missions
+                    val mainActivity = MainActivity.getInstance()
+                    val sequencer = mainActivity?.missionSequencer
+                    if (sequencer != null) {
+                        sequencer.enqueueAll(specs)
+                        android.util.Log.d(TAG, "Enqueued ${specs.size} missions for sequencer missed alarm")
+                        
+                        // Start the sequencer
+                        sequencer.startWhenAlarmFires(alarm.ringtoneUri)
+                        android.util.Log.d(TAG, "Started sequencer for missed alarm: alarmId=$currentAlarmId")
+                    } else {
+                        android.util.Log.w(TAG, "MissionSequencer not available for sequencer missed alarm: alarmId=$currentAlarmId")
+                    }
+                } else {
+                    android.util.Log.w(TAG, "Invalid alarm for sequencer missed alarm: alarmId=$currentAlarmId, missionType=${alarm?.missionType}")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Error handling sequencer missed alarm: alarmId=$currentAlarmId, error: ${e.message}")
+            }
+        }
 
         // Speak current time via service-level TTS only for initial alarm launches, not wake-check follow-ups
         if (!isWakeCheckLaunch) {
@@ -1576,8 +1633,9 @@ private fun shutdownTTSForensic() {
                     val currentMission = sequencer?.getCurrentMission()
                     
                     if (currentMission != null) {
+                        val actualMissionType = currentMission.params["mission_type"] ?: currentMission.id
                         putExtra("mission_id", currentMission.id)
-                        putExtra("mission_type", currentMission.id)
+                        putExtra("mission_type", actualMissionType)
                     }
                 } catch (_: Exception) {}
             }
