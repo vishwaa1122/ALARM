@@ -977,6 +977,9 @@ class MissionSequencer(private val context: Context) {
     fun getQueueStore(): MissionQueueStore = queueStore
     
     private fun getCurrentAlarmId(): Int {
+        // DPS INVARIANT: current_service_alarm_id always stores alarmId, not missionId
+        // For sequencer alarms, this is the sequencer alarm's ID that persists across all missions
+        
         // Try to get the current alarm ID from the current mission parameters
         currentMission?.params?.get("alarm_id")?.let { return it.toIntOrNull() ?: -1 }
         
@@ -986,7 +989,8 @@ class MissionSequencer(private val context: Context) {
             current?.first?.params?.get("alarm_id")?.let { return it.toIntOrNull() ?: -1 }
         } catch (_: Exception) { }
         
-        // Fallback: try to get it from shared preferences or other storage
+        // DPS INVARIANT: Fallback to DPS which stores the sequencer alarm ID
+        // This ensures we always return the alarm ID, never a mission ID
         return try {
             val prefs = context.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
             prefs.getInt("current_service_alarm_id", -1)

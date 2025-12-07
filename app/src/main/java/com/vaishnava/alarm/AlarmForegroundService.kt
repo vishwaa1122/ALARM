@@ -407,6 +407,8 @@ class AlarmForegroundService : Service() {
                     .apply()
             } catch (_: Exception) { }
 
+            // DPS INVARIANT: Clear current_service_alarm_id only when service truly stops
+            // For sequencer alarms, this must persist until entire mission sequence is complete
             restoreInterruptionFilterIfNeeded()
 
             // Restore previous alarm volume if saved
@@ -529,6 +531,9 @@ class AlarmForegroundService : Service() {
                 .putInt("current_service_alarm_id", currentAlarmId)
                 .apply()
         } catch (_: Exception) { }
+        
+        // DPS INVARIANT: Write sequencer alarm ID to DPS before any multimission logic
+        // This ensures current_service_alarm_id persists across entire mission sequence
         isWakeCheckLaunch = intent?.getBooleanExtra("from_wake_check", false) == true
         isMissedAlarm = intent?.getBooleanExtra("is_missed_alarm", false) == true
         this.ringtoneUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
