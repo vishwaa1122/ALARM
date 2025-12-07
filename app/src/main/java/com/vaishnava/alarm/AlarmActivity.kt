@@ -606,67 +606,21 @@ class AlarmActivity : ComponentActivity() {
                             currentMissionId = currentMission.id
                             actualMissionType
                         } else {
-                            // Fallback: Rebuild mission queue from alarm configuration for force restart scenarios
-                            try {
-                                val mainActivity = MainActivity.getInstance()
-                                val sequencer = mainActivity?.missionSequencer
-                                 
-                                // Parse mission names from missionPassword field (e.g., "Tap+Pwd")
-                                val missionNames = alarm?.missionPassword ?: ""
-                                val missionIds = missionNames.split("+").map { it.trim().lowercase() }
-                                    .map { mission -> 
-                                        when (mission) {
-                                            "tap" -> "tap"
-                                            "pwd", "password" -> "password"
-                                            else -> mission
-                                        }
-                                    }
-                                    .filter { it.isNotEmpty() && it != "none" }
-                                 
-                                Log.d(TAG, "FORCE_RESTART_DEBUG: Rebuilding mission queue from alarm: $missionIds")
-                                 
-                                // Create mission specs from the parsed mission IDs
-                                val specs = missionIds.map { missionId -> 
-                                    val safeMissionId = missionId
-                                    val timeoutMs = if (safeMissionId == "tap") 105000L else 30000L
-                                    com.vaishnava.alarm.sequencer.MissionSpec(
-                                        id = safeMissionId,
-                                        params = mapOf("mission_type" to safeMissionId),
-                                        timeoutMs = timeoutMs,
-                                        retryCount = 3,
-                                        sticky = true,
-                                        retryDelayMs = 1000L
-                                    )
+                            // Fallback: Get first mission from alarm's missionPassword for force restart scenarios
+                            val alarmMissionPassword = alarm?.missionPassword ?: ""
+                            if (alarmMissionPassword.isNotEmpty()) {
+                                // Parse first mission from missionPassword (e.g., "Tap+Pwd" -> "Tap")
+                                val firstMission = alarmMissionPassword.split("+").first().trim().lowercase()
+                                val actualMissionType = when (firstMission) {
+                                    "tap" -> "tap"
+                                    "pwd", "password" -> "password"
+                                    else -> firstMission
                                 }
-                                 
-                                // Enqueue all missions first
-                                sequencer?.enqueueAll(specs)
-                                Log.d(TAG, "FORCE_RESTART_DEBUG: Enqueued ${specs.size} missions for force restart")
-                                 
-                                // Get the first mission (current mission after restart)
-                                val currentMission = sequencer?.getCurrentMission()
-                                if (currentMission != null) {
-                                    val actualMissionType = currentMission.params["mission_type"] ?: currentMission.id
-                                    Log.d(TAG, "FORCE_RESTART_DEBUG: Using rebuilt queue current mission - id=${currentMission.id}, type=$actualMissionType")
-                                    intent?.putExtra("mission_id", currentMission.id)
-                                    intent?.putExtra("mission_type", actualMissionType)
-                                    currentMissionId = currentMission.id
-                                    actualMissionType
-                                } else {
-                                    Log.d(TAG, "FORCE_RESTART_DEBUG: No current mission after rebuild, using first mission")
-                                    val firstMission = specs.firstOrNull()
-                                    if (firstMission != null) {
-                                        val actualMissionType = firstMission.params["mission_type"] ?: firstMission.id
-                                        intent?.putExtra("mission_id", firstMission.id)
-                                        intent?.putExtra("mission_type", actualMissionType)
-                                        currentMissionId = firstMission.id
-                                        actualMissionType
-                                    } else {
-                                        missionId ?: "unknown"
-                                    }
-                                }
-                            } catch (e: Exception) {
-                                Log.e(TAG, "FORCE_RESTART_DEBUG: Exception rebuilding queue", e)
+                                intent?.putExtra("mission_id", firstMission)
+                                intent?.putExtra("mission_type", actualMissionType)
+                                currentMissionId = firstMission
+                                actualMissionType
+                            } else {
                                 missionId ?: "unknown"
                             }
                         }

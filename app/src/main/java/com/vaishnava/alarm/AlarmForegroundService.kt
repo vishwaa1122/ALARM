@@ -445,6 +445,7 @@ class AlarmForegroundService : Service() {
         isWakeCheckLaunch = intent?.getBooleanExtra("from_wake_check", false) == true
         isMissedAlarm = intent?.getBooleanExtra("is_missed_alarm", false) == true
         val isSequencerMissedAlarm = intent?.getBooleanExtra("is_sequencer_missed_alarm", false) == true
+        val isForceRestartSequencer = intent?.getBooleanExtra("is_force_restart_sequencer", false) == true
 
         // Check if this is a DPS auto-launch scenario (no activity shown yet)
         if (alarmId != -1 && !isWakeCheckLaunch && !isMissedAlarm) {
@@ -648,6 +649,66 @@ class AlarmForegroundService : Service() {
                 }
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "Error handling sequencer missed alarm: alarmId=$currentAlarmId, error: ${e.message}")
+            }
+        }
+        
+        // Handle force restart sequencer alarms by rebuilding the mission queue
+        if (!isSequencerMissedAlarm && !isMissedAlarm && !isWakeCheckLaunch) {
+            try {
+                val alarm = alarmStorage.getAlarm(currentAlarmId)
+                if (alarm != null && alarm.missionType == "sequencer") {
+                    // Check if this is a force restart by seeing if MissionSequencer queue is empty
+                    val mainActivity = MainActivity.getInstance()
+                    val sequencer = mainActivity?.missionSequencer
+                    val queueSize = sequencer?.getQueueSize() ?: 0
+                    val currentMission = sequencer?.getCurrentMission()
+                    
+                    android.util.Log.d(TAG, "FORCE_RESTART_CHECK: alarmId=$currentAlarmId queueSize=$queueSize currentMission=${currentMission?.id}")
+                    
+                    // If queue is empty and no current mission, this is likely a force restart
+                    if (queueSize == 0 && currentMission == null) {
+                        android.util.Log.d(TAG, "Detected force restart sequencer: rebuilding mission queue for alarmId=$currentAlarmId")
+                        
+                        // Parse mission names from missionPassword field (e.g., "Tap+Pwd")
+                        val missionNames = alarm.missionPassword ?: ""
+                        val missionIds = missionNames.split("+").map { it.trim().lowercase() }
+                            .map { mission ->
+                                when (mission) {
+                                    "tap" -> "tap"
+                                    "pwd", "password" -> "password"
+                                    else -> mission
+                                }
+                            }
+                            .filter { it.isNotEmpty() && it != "none" }
+                        
+                        android.util.Log.d(TAG, "Parsed mission IDs for force restart sequencer: $missionIds")
+                        
+                        // Create mission specs from the parsed mission IDs
+                        val specs = missionIds.map { missionId ->
+                            val safeMissionId = missionId
+                            val timeoutMs = if (safeMissionId == "tap") 105000L else 30000L
+                            android.util.Log.d(TAG, "Creating mission spec for force restart sequencer: $safeMissionId (timeout: $timeoutMs)")
+                            com.vaishnava.alarm.sequencer.MissionSpec(
+                                id = safeMissionId,
+                                params = mapOf("mission_type" to safeMissionId),
+                                timeoutMs = timeoutMs,
+                                retryCount = 3,
+                                sticky = true,
+                                retryDelayMs = 1000L
+                            )
+                        }
+                        
+                        // Enqueue all missions
+                        sequencer?.enqueueAll(specs)
+                        android.util.Log.d(TAG, "Enqueued ${specs.size} missions for force restart sequencer")
+                        
+                        // Start the sequencer
+                        sequencer?.startWhenAlarmFires(alarm.ringtoneUri)
+                        android.util.Log.d(TAG, "Started sequencer for force restart: alarmId=$currentAlarmId")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "Error handling force restart sequencer: alarmId=$currentAlarmId, error: ${e.message}")
             }
         }
 
