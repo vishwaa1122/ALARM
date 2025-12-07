@@ -606,7 +606,23 @@ class AlarmActivity : ComponentActivity() {
                             currentMissionId = currentMission.id
                             actualMissionType
                         } else {
-                            missionId ?: "unknown"
+                            // Fallback: Get mission info from alarm's missionPassword for force restart scenarios
+                            val alarmMissionPassword = alarm?.missionPassword ?: ""
+                            if (alarmMissionPassword.isNotEmpty()) {
+                                // Parse first mission from missionPassword (e.g., "Tap+Pwd" -> "Tap")
+                                val firstMission = alarmMissionPassword.split("+").first().trim().lowercase()
+                                val actualMissionType = when (firstMission) {
+                                    "tap" -> "tap"
+                                    "pwd", "password" -> "password"
+                                    else -> firstMission
+                                }
+                                intent?.putExtra("mission_id", firstMission)
+                                intent?.putExtra("mission_type", actualMissionType)
+                                currentMissionId = firstMission
+                                actualMissionType
+                            } else {
+                                missionId ?: "unknown"
+                            }
                         }
                     } catch (_: Exception) {
                         missionId ?: "unknown"
