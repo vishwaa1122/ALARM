@@ -1552,6 +1552,30 @@ private fun shutdownTTSForensic() {
             putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri?.toString())
             putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, currentRepeatDays)
             if (isWakeCheckLaunch) putExtra("from_wake_check", true)
+            
+            // Check if this is a sequencer alarm and add sequencer flags
+            val alarm = try {
+                alarmStorage.getAlarm(currentAlarmId)
+            } catch (_: Exception) {
+                null
+            }
+            
+            if (alarm?.missionType == "sequencer") {
+                putExtra(com.vaishnava.alarm.sequencer.MissionSequencer.EXTRA_FROM_SEQUENCER, true)
+                putExtra("sequencer_context", "notification_press")
+                
+                // Get current mission info from MissionSequencer
+                try {
+                    val mainActivity = MainActivity.getInstance()
+                    val sequencer = mainActivity?.missionSequencer
+                    val currentMission = sequencer?.getCurrentMission()
+                    
+                    if (currentMission != null) {
+                        putExtra("mission_id", currentMission.id)
+                        putExtra("mission_type", currentMission.id)
+                    }
+                } catch (_: Exception) {}
+            }
         }
         return PendingIntent.getActivity(
             this,

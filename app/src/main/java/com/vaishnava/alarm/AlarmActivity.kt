@@ -588,9 +588,29 @@ class AlarmActivity : ComponentActivity() {
             // For sequencer missions, use the mission type from the intent instead
             val persistedMissionType = if (isSequencerMission) {
                 val missionType = intent?.getStringExtra("mission_type")
-                Log.d(TAG, "SEQUENCER_MISSION_TYPE: alarmId=$alarmId missionType=$missionType missionId=${intent?.getStringExtra("mission_id")}")
-                // Never default to "none" for sequencer missions - use mission_id as fallback
-                missionType ?: intent?.getStringExtra("mission_id") ?: "unknown"
+                val missionId = intent?.getStringExtra("mission_id")
+                
+                // If mission info is missing from notification press, get it from MissionSequencer
+                if (missionType == null && sequencerContext == "notification_press") {
+                    try {
+                        val mainActivity = MainActivity.getInstance()
+                        val sequencer = mainActivity?.missionSequencer
+                        val currentMission = sequencer?.getCurrentMission()
+                        
+                        if (currentMission != null) {
+                            intent?.putExtra("mission_id", currentMission.id)
+                            intent?.putExtra("mission_type", currentMission.id)
+                            currentMissionId = currentMission.id
+                            currentMission.id
+                        } else {
+                            missionId ?: "unknown"
+                        }
+                    } catch (_: Exception) {
+                        missionId ?: "unknown"
+                    }
+                } else {
+                    missionType ?: missionId ?: "unknown"
+                }
             } else {
                 alarm?.missionType ?: ""
             }
