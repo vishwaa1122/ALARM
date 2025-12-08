@@ -237,7 +237,23 @@ class MainActivity : BaseActivity() {
 
         alarmStorage = AlarmStorage(this)
         alarmScheduler = AndroidAlarmScheduler(this)
+        
+        // CRITICAL FIX: Add notification to check if MainActivity is being called during force restart
+        try {
+            val allAlarms = alarmStorage.getAlarms()
+            val sequencerAlarms = allAlarms.filter { it.missionType == "sequencer" }
+            Log.d("MainActivity_FORCE_RESTART", "MainActivity onCreate: Found ${sequencerAlarms.size} sequencer alarms out of ${allAlarms.size} total")
+            sequencerAlarms.take(3).forEach { alarm ->
+                Log.d("MainActivity_SAMPLE", "ID=${alarm.id}, Type=${alarm.missionType}, Password=${alarm.missionPassword}")
+            }
+        } catch (e: Exception) {
+            Log.e("MainActivity_FORCE_RESTART", "Failed to read alarms in onCreate", e)
+        }
+        
         missionSequencer = MissionSequencer(this)
+        
+        // CRITICAL FIX: Clear corrupted JSON files since we now use DPS SharedPreferences
+        missionSequencer.getQueueStore().clearCorruptedFiles()
         
         // Set static instance for AlarmActivity access
         instance = this
@@ -335,6 +351,14 @@ class MainActivity : BaseActivity() {
 
                             val finalDays = if (days.isEmpty()) null else days.toList()
 
+                            // CRITICAL FIX: If missionPassword contains "+", it's a sequence - set missionType to "sequencer"
+                            val actualMissionType = if (!missionPassword.isNullOrEmpty() && missionPassword.contains("+")) {
+                                Log.d("MainActivity", "Auto-setting missionType to 'sequencer' for sequence password: $missionPassword")
+                                "sequencer"
+                            } else {
+                                missionType
+                            }
+
                             val alarm = com.vaishnava.alarm.data.Alarm(
                                 id = alarmId,
                                 hour = hour,
@@ -343,7 +367,7 @@ class MainActivity : BaseActivity() {
                                 ringtoneUri = ringtoneUri,
                                 days = finalDays,
                                 isProtected = isProtected,
-                                missionType = missionType,
+                                missionType = actualMissionType,
                                 missionPassword = missionPassword,
                                 wakeCheckEnabled = wakeCheckEnabled,
                                 wakeCheckMinutes = wakeCheckMinutes,
@@ -352,6 +376,31 @@ class MainActivity : BaseActivity() {
                                 createdTime = System.currentTimeMillis() // Track creation time
                             )
                             Log.d("AlarmApp", "Created alarm object with ID: ${alarm.id}")
+                            
+                            // CRITICAL FIX: Save mission data to DPS immediately when alarm is created
+                            // This prevents JSON corruption and ensures Direct Boot compatibility
+                            try {
+                                val dpsPrefs = this@MainActivity.applicationContext.getSharedPreferences(
+                                    "direct_boot_alarm_prefs",
+                                    Context.MODE_PRIVATE
+                                )
+
+                                dpsPrefs.edit()
+                                    .putString("direct_boot_mission_type_${alarm.id}", alarm.missionType ?: "none")
+                                    .putString("direct_boot_mission_password_${alarm.id}", alarm.missionPassword ?: "")
+                                    .putString("direct_boot_ringtone_${alarm.id}", alarm.ringtoneUri?.toString())
+                                    .putBoolean("direct_boot_is_protected_${alarm.id}", alarm.isProtected)
+                                    .putBoolean("direct_boot_wake_check_enabled_${alarm.id}", alarm.wakeCheckEnabled)
+                                    .putInt("direct_boot_wake_check_minutes_${alarm.id}", alarm.wakeCheckMinutes)
+                                    .apply()
+
+                                Log.d(
+                                    "AlarmApp",
+                                    "DPS: Saved mission data for alarm ${alarm.id} - type: ${alarm.missionType}, password: ${alarm.missionPassword}"
+                                )
+                            } catch (e: Exception) {
+                                Log.e("AlarmApp", "DPS: Failed to save mission data for alarm ${alarm.id}", e)
+                            }
                             
                             // If this is a sequencer alarm, update the queued missions with the alarm ID
                             if (missionType == "sequencer") {
@@ -687,7 +736,7 @@ class MainActivity : BaseActivity() {
     private fun promptAutoStartIfNeeded() {
         // Many OEMs gate auto-start under their own settings. Attempt best-effort intents.
         try {
-            val prefs = getSharedPreferences("oem_prompts", Context.MODE_PRIVATE)
+            val prefs = this@MainActivity.getSharedPreferences("oem_prompts", Context.MODE_PRIVATE)
             if (prefs.getBoolean("auto_start_prompted_once", false)) {
                 return
             }
@@ -1115,7 +1164,7 @@ class MainActivity : BaseActivity() {
     }
 
     public fun markAlarmSet(value: Boolean) {
-        val prefs = getSharedPreferences("AlarmPrefs", Context.MODE_PRIVATE)
+        val prefs = this@MainActivity.getSharedPreferences("AlarmPrefs", Context.MODE_PRIVATE)
         prefs.edit().putBoolean("alarm_set", value).apply()
     }
     private val clearNotificationReceiver = object : BroadcastReceiver() {
@@ -1621,13 +1670,21 @@ fun AlarmScreenContent(
                                 }
                             },
                             onTimeEdit = { alarmToEdit, newHour, newMinute, newRingtoneUri, newDays, newMissionType, newMissionPassword, newIsProtected, newWakeCheckEnabled, newWakeCheckMinutes ->
+                                // CRITICAL FIX: If missionPassword contains "+", it's a sequence - set missionType to "sequencer"
+                                val actualMissionType = if (!newMissionPassword.isNullOrEmpty() && newMissionPassword.contains("+")) {
+                                    Log.d("MainActivity", "Auto-setting missionType to 'sequencer' for updated sequence password: $newMissionPassword")
+                                    "sequencer"
+                                } else {
+                                    newMissionType
+                                }
+                                
                                 // Update the alarm with all new values and mark time change as used
                                 val updatedAlarm = alarmToEdit.copy(
                                     hour = newHour,
                                     minute = newMinute,
                                     ringtoneUri = newRingtoneUri,
                                     days = newDays?.toList(),
-                                    missionType = newMissionType,
+                                    missionType = actualMissionType,
                                     missionPassword = newMissionPassword,
                                     isProtected = newIsProtected,
                                     wakeCheckEnabled = newWakeCheckEnabled,
@@ -1637,6 +1694,51 @@ fun AlarmScreenContent(
                                 )
                                 alarmStorage.updateAlarm(updatedAlarm)
                                 alarmScheduler.schedule(updatedAlarm)
+                                
+                                // CRITICAL FIX: Save updated mission data to DPS immediately when alarm is updated
+                                // This prevents JSON corruption and ensures Direct Boot compatibility
+                                try {
+                                    // Use the Compose LocalContext, not Activity 'this'
+                                    val appCtx = context.applicationContext
+                                    val dpsPrefs = appCtx.getSharedPreferences(
+                                        "direct_boot_alarm_prefs",
+                                        Context.MODE_PRIVATE
+                                    )
+
+                                    dpsPrefs.edit()
+                                        .putString(
+                                            "direct_boot_mission_type_${updatedAlarm.id}",
+                                            updatedAlarm.missionType ?: "none"
+                                        )
+                                        .putString(
+                                            "direct_boot_mission_password_${updatedAlarm.id}",
+                                            updatedAlarm.missionPassword ?: ""
+                                        )
+                                        .putString(
+                                            "direct_boot_ringtone_${updatedAlarm.id}",
+                                            updatedAlarm.ringtoneUri?.toString()
+                                        )
+                                        .putBoolean(
+                                            "direct_boot_is_protected_${updatedAlarm.id}",
+                                            updatedAlarm.isProtected
+                                        )
+                                        .putBoolean(
+                                            "direct_boot_wake_check_enabled_${updatedAlarm.id}",
+                                            updatedAlarm.wakeCheckEnabled
+                                        )
+                                        .putInt(
+                                            "direct_boot_wake_check_minutes_${updatedAlarm.id}",
+                                            updatedAlarm.wakeCheckMinutes
+                                        )
+                                        .apply()
+
+                                    Log.d(
+                                        "AlarmApp",
+                                        "DPS: Updated mission data for alarm ${updatedAlarm.id} - type: ${updatedAlarm.missionType}, password: ${updatedAlarm.missionPassword}"
+                                    )
+                                } catch (e: Exception) {
+                                    Log.e("AlarmApp", "DPS: Failed to update mission data for alarm ${updatedAlarm.id}", e)
+                                }
                                 
                                 // Update the alarm in the list
                                 val index = alarms.indexOfFirst { it.id == updatedAlarm.id }

@@ -21,6 +21,22 @@ class MissionQueueStore(private val context: Context) {
     private val queueFile = File(dpsContext.filesDir, QUEUE_FILE_NAME)
     private val currentMissionFile = File(dpsContext.filesDir, CURRENT_MISSION_FILE_NAME)
     
+    // CRITICAL FIX: Clear corrupted JSON files since we now use DPS SharedPreferences
+    fun clearCorruptedFiles() {
+        try {
+            if (queueFile.exists()) {
+                queueFile.delete()
+                MissionLogger.log("QUEUE_STORE_CLEAR: Deleted corrupted queue file")
+            }
+            if (currentMissionFile.exists()) {
+                currentMissionFile.delete()
+                MissionLogger.log("QUEUE_STORE_CLEAR: Deleted corrupted current mission file")
+            }
+        } catch (e: Exception) {
+            MissionLogger.logError("Failed to clear corrupted files", e)
+        }
+    }
+    
     fun saveQueue(queue: List<MissionSpec>) {
         try {
             MissionLogger.log("QUEUE_STORE_SAVE_START: size=${queue.size} path=${queueFile.absolutePath}")
@@ -58,7 +74,17 @@ class MissionQueueStore(private val context: Context) {
                 return emptyList()
             }
             
-            val jsonArray = JSONArray(queueFile.readText())
+            val fileContent = queueFile.readText()
+            
+            // Check if file content is valid JSON
+            if (!fileContent.trim().startsWith("[") || !fileContent.trim().endsWith("]")) {
+                MissionLogger.logError("Queue file corrupted - invalid JSON format", Exception("File content: $fileContent"))
+                // Clear corrupted file
+                queueFile.delete()
+                return emptyList()
+            }
+            
+            val jsonArray = JSONArray(fileContent)
             val queue = mutableListOf<MissionSpec>()
             
             for (i in 0 until jsonArray.length()) {

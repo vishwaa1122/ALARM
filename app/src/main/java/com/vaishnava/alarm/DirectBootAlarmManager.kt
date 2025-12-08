@@ -132,13 +132,20 @@ object DirectBootAlarmManager {
             prefs.edit()
                 .putString("alarm_${alarm.id}", "${alarm.hour}:${alarm.minute}:${System.currentTimeMillis()}:" +
                     "${alarm.isEnabled}:${alarm.days?.joinToString(",") ?: ""}:" +
-                    "$ringtoneUriString:${if (isContentUri) "1" else "0"}")
+                    "$ringtoneUriString:${if (isContentUri) "1" else "0"}:" +
+                    "${alarm.isProtected}:${alarm.missionType ?: "none"}:${alarm.missionPassword ?: ""}:" +
+                    "${alarm.wakeCheckEnabled}:${alarm.wakeCheckMinutes}")
                 .putString("alarm_ringtone_${alarm.id}", ringtoneUriString)
                 .putBoolean("alarm_ringtone_is_content_${alarm.id}", isContentUri)
                 .putBoolean("alarm_ringtone_cached_${alarm.id}", isCached)
+                .putString("alarm_mission_type_${alarm.id}", alarm.missionType ?: "none")
+                .putString("alarm_mission_password_${alarm.id}", alarm.missionPassword ?: "")
+                .putBoolean("alarm_is_protected_${alarm.id}", alarm.isProtected)
+                .putBoolean("alarm_wake_check_enabled_${alarm.id}", alarm.wakeCheckEnabled)
+                .putInt("alarm_wake_check_minutes_${alarm.id}", alarm.wakeCheckMinutes)
                 .apply()
                 
-            android.util.Log.d(TAG, "Alarm ${alarm.id} saved to Direct Boot storage with ringtone: $ringtoneUriString (isContent: $isContentUri, cached: $isCached)")
+            android.util.Log.d(TAG, "Alarm ${alarm.id} saved to Direct Boot storage with ringtone: $ringtoneUriString (isContent: $isContentUri, cached: $isCached), mission: ${alarm.missionType}, protected: ${alarm.isProtected}")
             
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Failed to save alarm to Direct Boot storage: ${e.message}", e)
@@ -161,6 +168,14 @@ object DirectBootAlarmManager {
             
             prefs.edit()
                 .remove("alarm_${alarm.id}")
+                .remove("alarm_ringtone_${alarm.id}")
+                .remove("alarm_ringtone_is_content_${alarm.id}")
+                .remove("alarm_ringtone_cached_${alarm.id}")
+                .remove("alarm_mission_type_${alarm.id}")
+                .remove("alarm_mission_password_${alarm.id}")
+                .remove("alarm_is_protected_${alarm.id}")
+                .remove("alarm_wake_check_enabled_${alarm.id}")
+                .remove("alarm_wake_check_minutes_${alarm.id}")
                 .apply()
                 
             android.util.Log.d(TAG, "Alarm ${alarm.id} removed from Direct Boot storage")
@@ -209,7 +224,7 @@ object DirectBootAlarmManager {
                     val alarmId = key.removePrefix("alarm_").toInt()
                     val parts = (value as String).split(":")
                     
-                    if (parts.size >= 7) {
+                    if (parts.size >= 11) {
                         val hour = parts[0].toInt()
                         val minute = parts[1].toInt()
                         val timestamp = parts[2].toLong()
@@ -217,6 +232,20 @@ object DirectBootAlarmManager {
                         val daysStr = parts[4]
                         val ringtoneUriStr = parts[5]
                         val isHidden = parts[6].toBoolean()
+                        val isProtected = parts[7].toBoolean()
+                        val missionType = parts[8]
+                        val missionPassword = parts[9]
+                        val wakeCheckEnabled = parts[10].toBoolean()
+                        val wakeCheckMinutes = parts[11].toIntOrNull() ?: 5
+                        
+                        // FIX: If missionPassword contains "+" but missionType is not "sequencer", 
+                        // this is likely a sequencer mission that was misclassified
+                        val correctedMissionType = if (missionPassword.contains("+") && missionType != "sequencer") {
+                            android.util.Log.w(TAG, "DirectBootAlarmManager: Correcting mission type from '$missionType' to 'sequencer' for alarm $alarmId (missionPassword contains sequence)")
+                            "sequencer"
+                        } else {
+                            missionType
+                        }
                         
                         val days = if (daysStr.isNotBlank()) {
                             daysStr.split(",").map { it.toInt() }
@@ -228,6 +257,22 @@ object DirectBootAlarmManager {
                         var ringtoneUri: android.net.Uri? = null
                         val savedRingtone = prefs.getString("alarm_ringtone_$alarmId", null)
                         val isContentUri = prefs.getBoolean("alarm_ringtone_is_content_${alarmId}", false)
+                        
+                        // Get mission data from separate keys for better reliability
+                        val savedMissionType = prefs.getString("alarm_mission_type_${alarmId}", correctedMissionType)
+                        val savedMissionPassword = prefs.getString("alarm_mission_password_${alarmId}", missionPassword)
+                        val savedIsProtected = prefs.getBoolean("alarm_is_protected_${alarmId}", isProtected)
+                        val savedWakeCheckEnabled = prefs.getBoolean("alarm_wake_check_enabled_${alarmId}", wakeCheckEnabled)
+                        val savedWakeCheckMinutes = prefs.getInt("alarm_wake_check_minutes_${alarmId}", wakeCheckMinutes)
+                        
+                        // FINAL FIX: Always ensure sequencer missions have correct mission type
+                        // ANY mission password containing "+" is a sequence (tap+password, password+tap, etc.)
+                        val finalMissionType = if (savedMissionPassword?.contains("+") == true) {
+                            android.util.Log.d(TAG, "DirectBootAlarmManager: Ensuring sequencer mission type for alarm $alarmId (password contains sequence: $savedMissionPassword)")
+                            "sequencer"
+                        } else {
+                            savedMissionType
+                        }
                         
                         // First, try to use the cached ringtone in device-protected storage
                         try {
@@ -289,7 +334,12 @@ object DirectBootAlarmManager {
                             ringtoneUri = ringtoneUri,
                             days = if (days.isNotEmpty()) days else null,
                             alarmTime = timestamp,
-                            isHidden = isHidden
+                            isHidden = isHidden,
+                            isProtected = savedIsProtected,
+                            missionType = if (finalMissionType == "none") null else finalMissionType,
+                            missionPassword = if (finalMissionType == "sequencer") savedMissionPassword else savedMissionPassword,
+                            wakeCheckEnabled = savedWakeCheckEnabled,
+                            wakeCheckMinutes = savedWakeCheckMinutes
                         )
                         
                         // Check if the alarm already exists with the same settings
@@ -299,7 +349,11 @@ object DirectBootAlarmManager {
                         if (existingAlarm == null || 
                             existingAlarm.hour != alarm.hour || 
                             existingAlarm.minute != alarm.minute ||
-                            existingAlarm.isEnabled != alarm.isEnabled) {
+                            existingAlarm.isEnabled != alarm.isEnabled ||
+                            existingAlarm.missionType != alarm.missionType ||
+                            existingAlarm.missionPassword != alarm.missionPassword ||
+                            existingAlarm.isProtected != alarm.isProtected ||
+                            existingAlarm.wakeCheckEnabled != alarm.wakeCheckEnabled) {
                             
                             // Update the alarm in storage
                             if (existingAlarm != null) {
@@ -311,7 +365,7 @@ object DirectBootAlarmManager {
                             // Schedule the alarm if enabled
                             if (isEnabled) {
                                 alarmScheduler.schedule(alarm)
-                                android.util.Log.d(TAG, "Restored and scheduled Direct Boot alarm: ID $alarmId at ${alarm.hour}:${alarm.minute}")
+                                android.util.Log.d(TAG, "Restored and scheduled Direct Boot alarm: ID $alarmId at ${alarm.hour}:${alarm.minute}, mission: ${alarm.missionType}, protected: ${alarm.isProtected}")
                             } else {
                                 android.util.Log.d(TAG, "Restored disabled alarm: ID $alarmId at ${alarm.hour}:${alarm.minute}")
                             }

@@ -246,7 +246,7 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
 
             // Last-resort: try to start the foreground service immediately to ensure sound
             try {
-                // Get the ringtone URI from DPS storage
+                // Get the ringtone URI and mission data from DPS storage
                 val ringtoneUri = try {
                     val prefs = actualDpsContext.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
                     val uriString = prefs.getString("direct_boot_ringtone_$ringId", null)
@@ -256,16 +256,44 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                     null
                 }
                 
+                // Get mission data for proper alarm configuration
+                val missionType = try {
+                    val prefs = actualDpsContext.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
+                    prefs.getString("direct_boot_mission_type_$ringId", null)
+                } catch (e: Exception) {
+                    Log.e("AlarmApp", "Failed to get mission type for DPS alarm ID=$ringId: ${e.message}")
+                    null
+                }
+                
+                val missionPassword = try {
+                    val prefs = actualDpsContext.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
+                    prefs.getString("direct_boot_mission_password_$ringId", null)
+                } catch (e: Exception) {
+                    Log.e("AlarmApp", "Failed to get mission password for DPS alarm ID=$ringId: ${e.message}")
+                    null
+                }
+                
+                val isProtected = try {
+                    val prefs = actualDpsContext.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
+                    prefs.getBoolean("direct_boot_is_protected_$ringId", false)
+                } catch (e: Exception) {
+                    Log.e("AlarmApp", "Failed to get protection status for DPS alarm ID=$ringId: ${e.message}")
+                    false
+                }
+                
                 val svc = Intent(actualDpsContext, AlarmForegroundService::class.java).apply {
                     putExtra(AlarmReceiver.ALARM_ID, ringId)
                     putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri)
+                    missionType?.let { putExtra("mission_type", it) }
+                    missionPassword?.let { putExtra("mission_password", it) }
+                    putExtra("is_protected", isProtected)
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     actualDpsContext.startForegroundService(svc)
                 } else {
                     actualDpsContext.startService(svc)
                 }
-                Log.d("AlarmApp", "DirectBootRestoreReceiver: started AlarmForegroundService for ID=$ringId with ringtone=$ringtoneUri")
+                Log.d("AlarmApp", "DirectBootRestoreReceiver: started AlarmForegroundService for ID=$ringId with ringtone=$ringtoneUri, mission=$missionType, protected=$isProtected")
             } catch (e: Exception) {
                 Log.e("AlarmApp", "DirectBootRestoreReceiver: Failed to start AlarmForegroundService for ID=$ringId: ${e.message}")
             }

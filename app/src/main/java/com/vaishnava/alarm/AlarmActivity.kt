@@ -584,20 +584,67 @@ class AlarmActivity : ComponentActivity() {
         val isWakeCheckAlarm: Boolean = try {
             val storage = AlarmStorage(applicationContext)
             val alarm = storage.getAlarms().find { it.id == alarmId }
+            
+            // CRITICAL FIX: Detect sequencer missions by checking alarm missionType, not just intent extra
+            // This ensures sequencer detection works during force restart when EXTRA_FROM_SEQUENCER is not set
+            if (alarm?.missionType == "sequencer" && !isSequencerMission) {
+                isSequencerMission = true
+                Log.d(TAG, "SEQUENCER_DETECTION: Detected sequencer mission from alarm missionType during force restart")
+            }
+            
             Log.d(TAG, "CONFIG_LOAD_START: alarmId=$alarmId isSequencerMission=$isSequencerMission sequencerContext=$sequencerContext hasAlarm=${alarm != null}")
 
-            // Persisted missionType from storage is the single source of truth for alarm missions.
-            // For sequencer missions, use the mission type from the intent instead
+            // For sequencer missions, always use fallback logic to ensure correct mission type
             val persistedMissionType = if (isSequencerMission) {
                 val missionType = intent?.getStringExtra("mission_type")
                 val missionId = intent?.getStringExtra("mission_id")
                 
-                // If mission info is missing for sequencer missions (notification press, missed alarm, force restart, etc.), get it from MissionSequencer
-                if (missionType == null && isSequencerMission) {
-                    try {
-                        val mainActivity = MainActivity.getInstance()
-                        val sequencer = mainActivity?.missionSequencer
-                        val currentMission = sequencer?.getCurrentMission()
+                // Always use fallback for sequencer missions to get correct mission
+                try {
+                    val mainActivity = MainActivity.getInstance()
+                    var sequencer = mainActivity?.missionSequencer
+                    
+                    if (sequencer == null) {
+                        // MainActivity is null (force restart), read current mission directly from DPS
+                        try {
+                            val dpsContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                                createDeviceProtectedStorageContext()
+                            } else {
+                                this
+                            }
+                            val queueStore = com.vaishnava.alarm.sequencer.MissionQueueStore(dpsContext)
+                            val savedCurrentMission = queueStore.loadCurrentMission()
+                            val mission = savedCurrentMission?.first
+                            
+                            if (mission != null) {
+                                val actualMissionType = mission.params["mission_type"] ?: mission.id
+                                intent?.putExtra("mission_id", mission.id)
+                                intent?.putExtra("mission_type", actualMissionType)
+                                currentMissionId = mission.id
+                                actualMissionType
+                            } else {
+                                // No saved mission, use first from missionPassword
+                                val missionNames = alarm?.missionPassword ?: ""
+                                if (missionNames.isNotEmpty()) {
+                                    val firstMission = missionNames.split("+").first().trim().lowercase()
+                                    val actualMissionType = when (firstMission) {
+                                        "tap" -> "tap"
+                                        "pwd", "password", "pswd" -> "password"
+                                        else -> firstMission
+                                    }
+                                    intent?.putExtra("mission_id", firstMission)
+                                    intent?.putExtra("mission_type", actualMissionType)
+                                    currentMissionId = firstMission
+                                    actualMissionType
+                                } else {
+                                    "unknown"
+                                }
+                            }
+                        } catch (_: Exception) {
+                            "unknown"
+                        }
+                    } else {
+                        val currentMission = sequencer.getCurrentMission()
                         
                         if (currentMission != null) {
                             val actualMissionType = currentMission.params["mission_type"] ?: currentMission.id
@@ -606,45 +653,39 @@ class AlarmActivity : ComponentActivity() {
                             currentMissionId = currentMission.id
                             actualMissionType
                         } else {
-                            // Fallback: Get first mission from alarm's missionPassword for force restart scenarios
-                            val alarmMissionPassword = alarm?.missionPassword ?: ""
-                            if (alarmMissionPassword.isNotEmpty()) {
-                                // Parse first mission from missionPassword (e.g., "Tap+Pwd" -> "Tap")
-                                val firstMission = alarmMissionPassword.split("+").first().trim().lowercase()
-                                val actualMissionType = when (firstMission) {
-                                    "tap" -> "tap"
-                                    "pwd", "password" -> "password"
-                                    else -> firstMission
+                            // Fallback: For force restart, always show first mission interface
+                            try {
+                                val missionNames = alarm?.missionPassword ?: ""
+                                if (missionNames.isNotEmpty()) {
+                                    // Always get first mission from missionPassword (e.g., "Tap+Pwd" -> "Tap")
+                                    val firstMission = missionNames.split("+").first().trim().lowercase()
+                                    val actualMissionType = when (firstMission) {
+                                        "tap" -> "tap"
+                                        "pwd", "password", "pswd" -> "password"
+                                        else -> firstMission
+                                    }
+                                    intent?.putExtra("mission_id", firstMission)
+                                    intent?.putExtra("mission_type", actualMissionType)
+                                    currentMissionId = firstMission
+                                    actualMissionType
+                                } else {
+                                    "unknown"
                                 }
-                                intent?.putExtra("mission_id", firstMission)
-                                intent?.putExtra("mission_type", actualMissionType)
-                                currentMissionId = firstMission
-                                actualMissionType
-                            } else {
-                                missionId ?: "unknown"
+                            } catch (_: Exception) {
+                                "unknown"
                             }
                         }
-                    } catch (_: Exception) {
-                        missionId ?: "unknown"
                     }
-                } else {
-                    missionType ?: missionId ?: "unknown"
+                } catch (_: Exception) {
+                    "unknown"
                 }
             } else {
                 alarm?.missionType ?: ""
             }
             missionTapEnabled = (persistedMissionType == "tap")
-            requiredPassword = when {
-                missionTapEnabled -> null
-                isSequencerMission && persistedMissionType == "password" -> DEFAULT_GLOBAL_PASSWORD
-                persistedMissionType == "password" ->
-                    alarm?.missionPassword?.takeIf { it.isNotBlank() } ?: DEFAULT_GLOBAL_PASSWORD
-                alarm?.missionPassword?.isNotBlank() == true ->
-                    alarm.missionPassword
-                else -> null
-            }
+            requiredPassword = getActualPassword(alarm, persistedMissionType)
 
-            Log.d(TAG, "MISSION_CONFIG: alarmId=$alarmId isSequencer=$isSequencerMission missionType=$persistedMissionType tapEnabled=$missionTapEnabled hasPassword=${requiredPassword != null}")
+            Log.d(TAG, "MISSION_CONFIG: alarmId=$alarmId isSequencer=$isSequencerMission missionType=$persistedMissionType tapEnabled=$missionTapEnabled hasPassword=${requiredPassword != null} requiredPassword=$requiredPassword alarmMissionType=${alarm?.missionType} alarmMissionPassword=${alarm?.missionPassword}")
 
             // Set currentMissionId for sequencer missions to prevent fallback issues
             if (isSequencerMission) {
@@ -1821,6 +1862,26 @@ class AlarmActivity : ComponentActivity() {
     }
 
     // -------------------- Dismiss / cleanup --------------------
+    // Helper function to determine actual password from mission data
+    private fun getActualPassword(alarm: Alarm?, missionType: String?): String? {
+        // If mission type is tap, no password needed
+        if (missionType == "tap") {
+            return null
+        }
+        
+        // CRITICAL FIX: If mission password contains "+", it's ANY sequence (tap+password, password+tap, etc.)
+        // Never use the sequence string as the actual password
+        val missionPassword = alarm?.missionPassword
+        if (missionPassword?.contains("+") == true) {
+            return DEFAULT_GLOBAL_PASSWORD // Use default password for any sequencer missions
+        }
+        
+        // For non-sequencer missions, use the mission password if it's a password mission
+        return if (missionType == "password" && alarm?.missionType != "sequencer") {
+            missionPassword?.takeIf { it.isNotBlank() } ?: DEFAULT_GLOBAL_PASSWORD
+        } else null
+    }
+
     private fun onTapMissionSuccess(alarmId: Int) {
         try {
             Log.d(TAG, "TAP_MISSION_SUCCESS: alarmId=$alarmId isSequencer=$isSequencerMission")

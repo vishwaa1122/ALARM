@@ -34,15 +34,20 @@ class AlarmStorage(context: Context) {
         
         Log.d("AlarmStorage", "Saved ${alarms.size} alarms to storage")
         for (alarm in alarms) {
-            Log.d("AlarmStorage", "Saved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}")
+            Log.d("AlarmStorage", "Saved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}, Mission: ${alarm.missionType}, Protected: ${alarm.isProtected}")
         }
 
-        // Also persist ringtone URIs in a device-protected prefs for Direct Boot playback
+        // Also persist ringtone URIs and mission data in device-protected prefs for Direct Boot playback
         try {
             val prefs = appContext.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
             val editor = prefs.edit()
             alarms.forEach { alarm ->
                 editor.putString("direct_boot_ringtone_${alarm.id}", alarm.ringtoneUri?.toString())
+                editor.putString("direct_boot_mission_type_${alarm.id}", alarm.missionType ?: "none")
+                editor.putString("direct_boot_mission_password_${alarm.id}", alarm.missionPassword ?: "")
+                editor.putBoolean("direct_boot_is_protected_${alarm.id}", alarm.isProtected)
+                editor.putBoolean("direct_boot_wake_check_enabled_${alarm.id}", alarm.wakeCheckEnabled)
+                editor.putInt("direct_boot_wake_check_minutes_${alarm.id}", alarm.wakeCheckMinutes)
             }
             editor.apply()
         } catch (_: Exception) { }
@@ -70,7 +75,7 @@ class AlarmStorage(context: Context) {
         
         Log.d("AlarmStorage", "Retrieved ${alarms.size} alarms from storage")
         for (alarm in alarms) {
-            Log.d("AlarmStorage", "Retrieved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}")
+            Log.d("AlarmStorage", "Retrieved alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}, Mission: ${alarm.missionType}, Protected: ${alarm.isProtected}")
         }
         
         return alarms
@@ -98,7 +103,7 @@ class AlarmStorage(context: Context) {
             }
             saveAlarms(currentAlarms)
             
-            Log.d("AlarmStorage", "Added/Updated alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}")
+            Log.d("AlarmStorage", "Added/Updated alarm ID: ${alarm.id}, Time: ${alarm.hour}:${alarm.minute}, Enabled: ${alarm.isEnabled}, Ringtone: ${alarm.ringtoneUri}, Mission: ${alarm.missionType}, Protected: ${alarm.isProtected}")
         }
     }
 

@@ -362,6 +362,20 @@ class AlarmForegroundService : Service() {
 
     private fun stopAlarm() {
         try {
+            // CRITICAL FIX: If sequencer is active, keep alarm service running
+            val isSequencerActive = try {
+                val mainActivity = MainActivity.getInstance()
+                val sequencer = mainActivity?.missionSequencer
+                sequencer != null && !sequencer.isSequencerComplete
+            } catch (e: Exception) {
+                false
+            }
+            
+            if (isSequencerActive) {
+                Log.d(TAG, "SEQUENCER_ACTIVE: Keeping alarm service active")
+                // Keep service in foreground but don't stop anything
+                return
+            }
             // Prevent any late UI relaunches or notifications
             try {
                 launcherScheduled.set(false)
@@ -435,6 +449,32 @@ class AlarmForegroundService : Service() {
         val alarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
         
         // CRITICAL: Handle STOP_ALARM_SERVICE action for sequencer completion
+        // CRITICAL FIX: Handle sequencer keep-alive
+        if (action == "com.vaishnava.alarm.KEEP_SEQUENCER_ALIVE") {
+            val sequencerActive = intent?.getBooleanExtra("sequencer_active", false) == true
+            val currentAlarmId = intent?.getIntExtra("current_alarm_id", -1) ?: -1
+            Log.d(TAG, "KEEP_SEQUENCER_ALIVE received: sequencerActive=$sequencerActive alarmId=$currentAlarmId")
+            
+            if (sequencerActive && currentAlarmId == this@AlarmForegroundService.currentAlarmId) {
+                try {
+                    // Keep service in foreground with simple notification
+                    val notification = android.app.Notification.Builder(this, "alarm_channel")
+                        .setContentTitle("Alarm Active")
+                        .setContentText("Sequencer mission in progress")
+                        .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                        .setPriority(android.app.Notification.PRIORITY_HIGH)
+                        .setOngoing(true)
+                        .build()
+                    
+                    startForeground(1, notification)
+                    Log.d(TAG, "KEEP_SEQUENCER_ALIVE: Service maintained for sequencer")
+                } catch (e: Exception) {
+                    Log.e(TAG, "KEEP_SEQUENCER_ALIVE: Failed to maintain service - ${e.message}")
+                }
+            }
+            return START_STICKY
+        }
+        
         if (action == "com.vaishnava.alarm.STOP_ALARM_SERVICE") {
             Log.d(TAG, "STOP_ALARM_SERVICE received, stopping service")
             stopAlarm()

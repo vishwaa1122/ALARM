@@ -148,7 +148,7 @@ class AlarmReceiver : BroadcastReceiver() {
                                 .map { mission ->
                                     when (mission) {
                                         "tap" -> "tap"
-                                        "pwd", "password" -> "password"
+                                        "pwd", "password", "pswd" -> "password"
                                         else -> mission
                                     }
                                 }
@@ -433,7 +433,8 @@ class AlarmReceiver : BroadcastReceiver() {
         }
 
         // 1b) For wake-up-check follow-ups, also start AlarmActivity directly so the "I'm awake" UI always shows
-        if (isWakeUpFollowUp) {
+        // BUT NOT for sequencer alarms - let the sequencer handle launching individual missions
+        if (isWakeUpFollowUp && alarm.missionType != "sequencer") {
             try {
                 val act = Intent(context, AlarmActivity::class.java).apply {
                     addFlags(
