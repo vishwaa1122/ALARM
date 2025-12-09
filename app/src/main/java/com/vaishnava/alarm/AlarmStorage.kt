@@ -2,6 +2,7 @@
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.Build
 import android.util.Log
 import android.net.Uri
 import com.google.gson.Gson
@@ -19,13 +20,33 @@ class AlarmStorage(context: Context) {
     private val gson: Gson
 
     init {
-        // Use a device-protected storage context for Direct Boot compatibility
-        val deviceProtectedContext = context.createDeviceProtectedStorageContext()
-        sharedPreferences = deviceProtectedContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        appContext = deviceProtectedContext
+        // CRITICAL FIX: Properly detect and use device-protected context
+        appContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            when {
+                // Case 1: Context is already device-protected - use it directly
+                context.isDeviceProtectedStorage -> {
+                    Log.d("AlarmStorage", "USING_EXISTING_DPS: Context is already device-protected")
+                    context
+                }
+                // Case 2: Create new device-protected context
+                else -> {
+                    Log.d("AlarmStorage", "CREATING_NEW_DPS: Converting regular context to device-protected")
+                    context.createDeviceProtectedStorageContext()
+                }
+            }
+        } else {
+            // Pre-N versions: use regular context
+            Log.d("AlarmStorage", "PRE_N_VERSION: Using regular context")
+            context
+        }
+        
+        sharedPreferences = appContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         gson = Gson().newBuilder()
             .registerTypeAdapter(Uri::class.java, UriAdapter())
             .create()
+        
+        // DEBUG: Log the actual context type being used
+        Log.d("AlarmStorage", "FINAL_CONTEXT: isDeviceProtected=${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) appContext.isDeviceProtectedStorage else "N/A"}")
     }
 
     fun saveAlarms(alarms: List<Alarm>) {
@@ -43,7 +64,7 @@ class AlarmStorage(context: Context) {
             val editor = prefs.edit()
             alarms.forEach { alarm ->
                 editor.putString("direct_boot_ringtone_${alarm.id}", alarm.ringtoneUri?.toString())
-                editor.putString("direct_boot_mission_type_${alarm.id}", alarm.missionType ?: "none")
+                editor.putString("direct_boot_mission_type_${alarm.id}", alarm.missionType ?: "")
                 editor.putString("direct_boot_mission_password_${alarm.id}", alarm.missionPassword ?: "")
                 editor.putBoolean("direct_boot_is_protected_${alarm.id}", alarm.isProtected)
                 editor.putBoolean("direct_boot_wake_check_enabled_${alarm.id}", alarm.wakeCheckEnabled)

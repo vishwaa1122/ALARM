@@ -2,8 +2,8 @@ package com.vaishnava.alarm.sequencer
 
 import android.app.AlarmManager
 import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
+import android.content.Context
 import android.util.Log
 import android.content.IntentFilter
 import android.os.Handler
@@ -21,6 +21,7 @@ class MissionSequencer(private val context: Context) {
         const val EXTRA_FROM_SEQUENCER = "from_sequencer"
         const val EXTRA_MISSION_ID = "mission_id"
         const val EXTRA_MISSION_SUCCESS = "success"
+        const val DEFAULT_GLOBAL_PASSWORD = "IfYouWantYouCanSleep"
         @Volatile private var instance: MissionSequencer? = null
     }
     
@@ -39,13 +40,19 @@ class MissionSequencer(private val context: Context) {
     
     private val missionCompletionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            val missionId = intent?.getStringExtra("mission_id")
-            val success = intent?.getBooleanExtra("success", false) ?: false
+            MissionLogger.log("BROADCAST_RECEIVED_ANY: action=${intent?.action}")
             
-            MissionLogger.log("MISSION_COMPLETION_RECEIVED: missionId=$missionId success=$success")
+            val missionId = intent?.getStringExtra(EXTRA_MISSION_ID)
+            val success = intent?.getBooleanExtra(EXTRA_MISSION_SUCCESS, true) ?: true
+            val fromSequencer = intent?.getBooleanExtra(EXTRA_FROM_SEQUENCER, false) ?: false
+            
+            MissionLogger.log("BROADCAST_RECEIVED: missionId=$missionId, success=$success, fromSequencer=$fromSequencer")
             
             if (missionId != null) {
-                handleMissionCompletion(missionId, success)
+                scope.launch {
+                    MissionLogger.log("CALLING_HANDLE_COMPLETION: $missionId")
+                    handleMissionCompletion(missionId, success)
+                }
             } else {
                 MissionLogger.logWarning("Received mission completion broadcast with null missionId")
             }
@@ -463,7 +470,7 @@ class MissionSequencer(private val context: Context) {
         }
     }
 
-    private suspend fun tryProcessNextMission(): Boolean {
+    suspend fun tryProcessNextMission(): Boolean {
         val logTag = "MissionSequencer"
         MissionLogger.log("TRY_NEXT_MISSION_ENTRY: thread=${Thread.currentThread().name}")
         // ... rest of the code remains the same ...
@@ -580,6 +587,7 @@ class MissionSequencer(private val context: Context) {
         try {
             // Convert password missions to use "IfYouWantYouCanSleep" as default password
             val safeMission = if (mission.id == "password") {
+                MissionLogger.logWarning("PASSWORD_CONVERT: Converting password mission to use default password")
                 mission.copy(
                     id = "password",
                     params = mapOf("mission_type" to "password", "use_default_password" to "true"),
@@ -592,6 +600,8 @@ class MissionSequencer(private val context: Context) {
             // Cancel any existing timeout
             timeoutJob?.cancel()
 
+            MissionLogger.log("STARTING_MISSION: ${safeMission.id}")
+
             // Start timeout for the mission
             startTimeout(safeMission, safeMission.timeoutMs)
 
@@ -600,37 +610,59 @@ class MissionSequencer(private val context: Context) {
                 try {
                     val intent = Intent(context, com.vaishnava.alarm.AlarmActivity::class.java).apply {
                         putExtra("mission_id", safeMission.id)
-                        putExtra("mission_type", safeMission.id)
+                        // CRITICAL FIX: Always use mission.id as mission_type for consistency (after conversion)
+                        val missionType = safeMission.id
+                        putExtra("mission_type", missionType)
+                        // CRITICAL FIX: Add mission_password for Intent-only approach
+                        val missionPassword = if (missionType == "password") DEFAULT_GLOBAL_PASSWORD else ""
+                        putExtra("mission_password", missionPassword)
                         putExtra(EXTRA_FROM_SEQUENCER, true)
+                        // CRITICAL FIX: Pass alarm ID and ringtone URI for proper ringtone display
                         putExtra(AlarmReceiver.ALARM_ID, getCurrentAlarmId())
-                        
                         val currentAlarmId = getCurrentAlarmId()
                         if (currentAlarmId != -1) {
                             val alarmStorage = com.vaishnava.alarm.AlarmStorage(context)
                             val alarm = alarmStorage.getAlarms().find { it.id == currentAlarmId }
+                            
+                            // Use alarm ringtone URI or fallback to original stored URI
                             val ringtoneUri = alarm?.ringtoneUri ?: originalRingtoneUri
+                            
+                            // CRITICAL FIX: Always pass ringtone URI if available, never skip
                             ringtoneUri?.let { uri ->
                                 putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, uri as android.os.Parcelable)
                             }
                         }
-                        
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        // CRITICAL FIX: Use flags that update the existing activity instead of creating a new one
+                        // This prevents the alarm from being dismissed between missions
                         addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                        addFlags(Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT)
                         addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        // Don't use NEW_TASK or CLEAR_TOP as they dismiss the current activity
                         safeMission.params.forEach { (key, value) ->
                             putExtra(key, value)
                         }
+                        
+                        // Debug logging for mission type
+                        MissionLogger.log("MISSION_INTENT_DEBUG: missionId=${safeMission.id} missionType=$missionType params=${safeMission.params} alarmId=${getCurrentAlarmId()}")
                     }
                     
                     context.startActivity(intent)
                     
+                    // CRITICAL FIX: Add a small delay to ensure the activity has time to process the new intent
+                    scope.launch {
+                        delay(100)
+                        MissionLogger.log("MISSION_STARTED_CONFIRMED: missionId=${safeMission.id} activity should be updated")
+                    }
+                    
+                    MissionLogger.log("MISSION_STARTED: missionId=${safeMission.id}")
+                    
                 } catch (e: Exception) {
+                    MissionLogger.logError("MISSION_START_ERROR: ${e.message}")
                     handleMissionCompletion(safeMission.id, false)
                 }
             }
 
         } catch (e: Exception) {
+            MissionLogger.logError("START_MISSION_ERROR: ${e.message}")
             handleMissionCompletion(mission.id, false)
         }
     }
@@ -726,10 +758,6 @@ class MissionSequencer(private val context: Context) {
                             handleSequencerComplete()
                         } else {
                             MissionLogger.log("ADVANCE_QUEUE_NEXT: id=$advanceId remaining=${queue.size}")
-                            
-                            // CRITICAL FIX: Ensure alarm service continues during mission transition
-                            ensureAlarmServiceContinues()
-                            
                             // Start next mission with a small delay to prevent black screen race condition
                             val nextMission = queue.first()
                             MissionLogger.log("ADVANCE_QUEUE_STARTING_NEXT: id=$advanceId nextMissionId=${nextMission.id} nextMissionType=${nextMission.params["mission_type"]}")
@@ -779,7 +807,7 @@ class MissionSequencer(private val context: Context) {
                             
                             // Launch next mission with delay to prevent activity state conflicts
                             scope.launch {
-                                delay(300) // 300ms delay to ensure proper activity cleanup
+                                delay(500) // Increased delay to ensure proper activity cleanup and update
                                 startMission(nextMission)
                             }
                         }
@@ -802,66 +830,6 @@ class MissionSequencer(private val context: Context) {
                 currentMission = null
                 ensureQueueContinues()
             }
-        }
-    }
-    
-    // CRITICAL FIX: Ensure alarm continues playing during sequencer missions
-    private fun ensureAlarmContinuesDuringMission() {
-        try {
-            // Send signal to alarm service to keep playing during missions
-            val keepPlayingIntent = Intent(context, com.vaishnava.alarm.AlarmForegroundService::class.java).apply {
-                action = "com.vaishnava.alarm.KEEP_ALARM_PLAYING"
-                putExtra("sequencer_mission_active", true)
-                putExtra("current_alarm_id", getCurrentAlarmId())
-                putExtra("do_not_stop_playback", true)
-            }
-            context.startService(keepPlayingIntent)
-            
-            // Schedule periodic reminders to keep alarm playing
-            scope.launch {
-                while (!isSequencerComplete) {
-                    try {
-                        kotlinx.coroutines.delay(4000) // Every 4 seconds
-                        if (!isSequencerComplete) {
-                            context.startService(keepPlayingIntent)
-                        }
-                    } catch (e: Exception) {
-                        // Continue even if service call fails
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Continue mission even if alarm continuation fails
-        }
-    }
-    
-    // CRITICAL FIX: Enhanced service continuity - ensure alarm service stays active
-    private fun ensureAlarmServiceContinues() {
-        try {
-            val keepAliveIntent = Intent(context, com.vaishnava.alarm.AlarmForegroundService::class.java).apply {
-                action = "com.vaishnava.alarm.KEEP_SEQUENCER_ALIVE"
-                putExtra("sequencer_active", true)
-                putExtra("current_alarm_id", getCurrentAlarmId())
-            }
-            
-            // Send immediate keep-alive
-            context.startService(keepAliveIntent)
-            
-            // Schedule frequent heartbeat every 3 seconds to keep service active
-            scope.launch {
-                while (!isSequencerComplete) {
-                    try {
-                        kotlinx.coroutines.delay(3000) // 3 seconds - frequent enough to prevent service death
-                        if (!isSequencerComplete) {
-                            context.startService(keepAliveIntent)
-                        }
-                    } catch (e: Exception) {
-                        // Continue even if fails
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            // Continue mission even if service keep-alive fails
         }
     }
     

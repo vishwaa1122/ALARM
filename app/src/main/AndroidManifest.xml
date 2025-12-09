@@ -178,6 +178,11 @@
                 <!-- ==== Services ==== -->
 
                 <service
+                    android:name=".AlarmDataService"
+                    android:enabled="true"
+                    android:exported="false" />
+
+                <service
                     android:name=".AlarmForegroundService"
                     android:enabled="true"
                     android:exported="false"

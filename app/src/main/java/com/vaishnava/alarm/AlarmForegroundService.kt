@@ -16,6 +16,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.vaishnava.alarm.data.resolveRingtoneTitle
 import com.vaishnava.alarm.data.Alarm
+import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileWriter
 import java.text.SimpleDateFormat
@@ -32,6 +33,15 @@ class AlarmForegroundService : Service() {
 
     companion object {
         private const val TAG: String = "AlarmForegroundService"
+        @Volatile private var forceRestartSequencer: com.vaishnava.alarm.sequencer.MissionSequencer? = null
+        
+        fun getForceRestartSequencer(): com.vaishnava.alarm.sequencer.MissionSequencer? {
+            return forceRestartSequencer
+        }
+        
+        fun clearForceRestartSequencer() {
+            forceRestartSequencer = null
+        }
         private const val REPOST_DELAY_MS: Long = 3000L // Reduced to 3 seconds for better persistence
         private const val PREFS_NAME = "alarm_volume_prefs"
         private const val KEY_PREV_VOLUME = "prev_alarm_volume"
@@ -62,6 +72,11 @@ class AlarmForegroundService : Service() {
     private var ringtoneUri: Uri? = null
     private var isWakeCheckLaunch: Boolean = false
     private var audioFocusRequest: android.media.AudioFocusRequest? = null
+    
+    // Mission data for Direct Boot restoration
+    private var currentMissionType: String? = null
+    private var currentMissionPassword: String? = null
+    private var currentIsProtected: Boolean = false
     private var duckRestoreRunnable: Runnable? = null
     private var alarmVolumeBeforeDuck: Int? = null
     private var ringtoneFallback: Ringtone? = null
@@ -214,6 +229,39 @@ class AlarmForegroundService : Service() {
     // Launch alarm activity (used by both activityLauncher and unlock receiver)
     private fun launchAlarmActivity() {
         try {
+            // Get current mission data to pass to AlarmActivity
+            var localMissionType: String? = currentMissionType
+            var localMissionPassword: String? = currentMissionPassword
+            var localIsProtected: Boolean = currentIsProtected
+            
+            // If no mission data available, try to get from alarm storage
+            if (localMissionType == null) {
+                try {
+                    val alarm = alarmStorage.getAlarm(currentAlarmId)
+                    localMissionType = alarm?.missionType
+                    localMissionPassword = alarm?.missionPassword
+                    localIsProtected = alarm?.isProtected ?: false
+                } catch (_: Exception) { }
+            }
+            
+            // CRITICAL FIX: Get complete alarm data to pass to AlarmActivity
+            var hour = -1
+            var minute = -1
+            var repeatDaily = false
+            var wakeCheckEnabled = false
+            var wakeCheckMinutes = 0
+            
+            try {
+                val alarm = alarmStorage.getAlarm(currentAlarmId)
+                if (alarm != null) {
+                    hour = alarm.hour
+                    minute = alarm.minute
+                    repeatDaily = alarm.repeatDaily
+                    wakeCheckEnabled = alarm.wakeCheckEnabled
+                    wakeCheckMinutes = alarm.wakeCheckMinutes
+                }
+            } catch (_: Exception) { }
+            
             val intent = Intent(this@AlarmForegroundService, AlarmActivity::class.java).apply {
                 addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -225,9 +273,43 @@ class AlarmForegroundService : Service() {
                             Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
                 )
                 putExtra(AlarmReceiver.ALARM_ID, currentAlarmId)
-                putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri?.toString())
-                putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, currentRepeatDays)
+                putExtra("extra_ringtone_uri", ringtoneUri?.toString())
+                putExtra("extra_repeat_days", currentRepeatDays)
+                // CRITICAL FIX: Pass complete mission data to prevent screen-off issues
+                putExtra("hour", hour)
+                putExtra("minute", minute)
+                putExtra("repeatDaily", repeatDaily)
+                putExtra("mission_type", localMissionType)
+                putExtra("mission_password", localMissionPassword)
+                putExtra("is_protected", localIsProtected)
+                putExtra("wake_check_enabled", wakeCheckEnabled)
+                putExtra("wake_check_minutes", wakeCheckMinutes)
                 if (isWakeCheckLaunch) putExtra("from_wake_check", true)
+                
+                // Pass mission data for Direct Boot restoration
+                localMissionType?.let { putExtra("mission_type", it) }
+                localMissionPassword?.let { putExtra("mission_password", it) }
+                putExtra("is_protected", localIsProtected)
+                
+                // For sequencer alarms, pass the current mission info (but NOT during force restart)
+                try {
+                    val alarm = alarmStorage.getAlarm(currentAlarmId)
+                    if (alarm?.missionType == "sequencer") {
+                        val mainActivity = MainActivity.getInstance()
+                        val sequencer = mainActivity?.missionSequencer
+                        val currentMission = sequencer?.getCurrentMission()
+                        
+                        // Only pass mission info if we have a current mission (not force restart)
+                        if (currentMission != null) {
+                            val actualMissionType = currentMission.params["mission_type"] ?: currentMission.id
+                            putExtra(com.vaishnava.alarm.sequencer.MissionSequencer.EXTRA_FROM_SEQUENCER, true)
+                            putExtra("sequencer_context", "notification_press")
+                            putExtra("mission_id", currentMission.id)
+                            putExtra("mission_type", actualMissionType)
+                        }
+                        // During force restart, don't pass any mission info - let AlarmActivity handle it
+                    }
+                } catch (_: Exception) {}
             }
             startActivity(intent)
         } catch (_: Exception) {
@@ -246,6 +328,11 @@ class AlarmForegroundService : Service() {
                     putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri?.toString())
                     putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, currentRepeatDays)
                     if (isWakeCheckLaunch) putExtra("from_wake_check", true)
+                    
+                    // Pass mission data for Direct Boot restoration
+                    currentMissionType?.let { putExtra("mission_type", it) }
+                    currentMissionPassword?.let { putExtra("mission_password", it) }
+                    putExtra("is_protected", currentIsProtected)
                 }
                 startActivity(fallbackIntent)
             } catch (_: Exception) { }
@@ -362,20 +449,6 @@ class AlarmForegroundService : Service() {
 
     private fun stopAlarm() {
         try {
-            // CRITICAL FIX: If sequencer is active, keep alarm service running
-            val isSequencerActive = try {
-                val mainActivity = MainActivity.getInstance()
-                val sequencer = mainActivity?.missionSequencer
-                sequencer != null && !sequencer.isSequencerComplete
-            } catch (e: Exception) {
-                false
-            }
-            
-            if (isSequencerActive) {
-                Log.d(TAG, "SEQUENCER_ACTIVE: Keeping alarm service active")
-                // Keep service in foreground but don't stop anything
-                return
-            }
             // Prevent any late UI relaunches or notifications
             try {
                 launcherScheduled.set(false)
@@ -449,36 +522,20 @@ class AlarmForegroundService : Service() {
         val alarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
         
         // CRITICAL: Handle STOP_ALARM_SERVICE action for sequencer completion
-        // CRITICAL FIX: Handle sequencer keep-alive
-        if (action == "com.vaishnava.alarm.KEEP_SEQUENCER_ALIVE") {
-            val sequencerActive = intent?.getBooleanExtra("sequencer_active", false) == true
-            val currentAlarmId = intent?.getIntExtra("current_alarm_id", -1) ?: -1
-            Log.d(TAG, "KEEP_SEQUENCER_ALIVE received: sequencerActive=$sequencerActive alarmId=$currentAlarmId")
-            
-            if (sequencerActive && currentAlarmId == this@AlarmForegroundService.currentAlarmId) {
-                try {
-                    // Keep service in foreground with simple notification
-                    val notification = android.app.Notification.Builder(this, "alarm_channel")
-                        .setContentTitle("Alarm Active")
-                        .setContentText("Sequencer mission in progress")
-                        .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
-                        .setPriority(android.app.Notification.PRIORITY_HIGH)
-                        .setOngoing(true)
-                        .build()
-                    
-                    startForeground(1, notification)
-                    Log.d(TAG, "KEEP_SEQUENCER_ALIVE: Service maintained for sequencer")
-                } catch (e: Exception) {
-                    Log.e(TAG, "KEEP_SEQUENCER_ALIVE: Failed to maintain service - ${e.message}")
-                }
-            }
-            return START_STICKY
-        }
-        
         if (action == "com.vaishnava.alarm.STOP_ALARM_SERVICE") {
-            Log.d(TAG, "STOP_ALARM_SERVICE received, stopping service")
-            stopAlarm()
-            return START_NOT_STICKY
+            Log.d(TAG, "STOP_ALARM_SERVICE received, checking if sequencer is complete")
+            
+            // CRITICAL FIX: Only stop service if sequencer is actually complete
+            val mainActivity = MainActivity.getInstance()
+            val sequencer = mainActivity?.missionSequencer ?: getForceRestartSequencer()
+            if (sequencer != null && sequencer.isSequencerComplete) {
+                Log.d(TAG, "STOP_ALARM_SERVICE: Sequencer is complete, stopping service")
+                stopAlarm()
+                return START_NOT_STICKY
+            } else {
+                Log.d(TAG, "STOP_ALARM_SERVICE: Sequencer not complete, ignoring stop request")
+                return START_STICKY
+            }
         }
         
         // Extract extras and update state
@@ -577,19 +634,43 @@ class AlarmForegroundService : Service() {
         // DPS INVARIANT: Write sequencer alarm ID to DPS before any multimission logic
         // This ensures current_service_alarm_id persists across entire mission sequence
         isWakeCheckLaunch = intent?.getBooleanExtra("from_wake_check", false) == true
-        isMissedAlarm = intent?.getBooleanExtra("is_missed_alarm", false) == true
+        isMissedAlarm = intent?.getBooleanExtra("is_missed_alarm", false) == false
         this.ringtoneUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra(AlarmReceiver.EXTRA_RINGTONE_URI, Uri::class.java)
         } else {
             @Suppress("DEPRECATION")
             intent?.getParcelableExtra(AlarmReceiver.EXTRA_RINGTONE_URI)
         }
+        
+        // Read mission data from intent extras (for Direct Boot restoration)
+        val missionType = intent?.getStringExtra("mission_type")
+        val missionPassword = intent?.getStringExtra("mission_password")
+        val isProtected = intent?.getBooleanExtra("is_protected", false) ?: false
+        
+        // Store mission data for later use when launching AlarmActivity
+        var storedMissionType: String? = null
+        var storedMissionPassword: String? = null
+        var storedIsProtected: Boolean = false
+        
+        // Try to get mission data from alarm storage as fallback
+        try {
+            val alarm = alarmStorage.getAlarm(currentAlarmId)
+            storedMissionType = alarm?.missionType
+            storedMissionPassword = alarm?.missionPassword
+            storedIsProtected = alarm?.isProtected ?: false
+        } catch (_: Exception) { }
+        
+        // Use intent data if available, otherwise use stored data
+        currentMissionType = missionType ?: storedMissionType
+        currentMissionPassword = missionPassword ?: storedMissionPassword
+        currentIsProtected = isProtected ?: storedIsProtected
+        
         currentRepeatDays = intent?.getIntArrayExtra(AlarmReceiver.EXTRA_REPEAT_DAYS) ?: intArrayOf()
 
         // Unified log to in-app overlay
         try {
             MissionLogger.log(
-                "Service id=$currentAlarmId wakeCheck=$isWakeCheckLaunch skipActivity=$skipActivityLaunch hasRingtone=${this.ringtoneUri != null}"
+                "Service id=$currentAlarmId wakeCheck=$isWakeCheckLaunch skipActivity=$skipActivityLaunch hasRingtone=${this.ringtoneUri != null} mission=$currentMissionType protected=$currentIsProtected"
             )
         } catch (_: Exception) { }
 
@@ -648,7 +729,7 @@ class AlarmForegroundService : Service() {
                         .map { mission ->
                             when (mission) {
                                 "tap" -> "tap"
-                                "pwd", "password" -> "password"
+                                "pwd", "password", "pswd" -> "password"
                                 else -> mission
                             }
                         }
@@ -692,63 +773,148 @@ class AlarmForegroundService : Service() {
             }
         }
         
-        // Handle force restart sequencer alarms by rebuilding the mission queue
+        // Detect force restart for sequencer alarms and restore exact mission sequence
         if (!isSequencerMissedAlarm && !isMissedAlarm && !isWakeCheckLaunch) {
             try {
                 val alarm = alarmStorage.getAlarm(currentAlarmId)
-                if (alarm != null && alarm.missionType == "sequencer") {
-                    // Check if this is a force restart by seeing if MissionSequencer queue is empty
+                if (alarm == null) {
+                    android.util.Log.w(TAG, "FORCE_RESTART_CHECK: No alarm found for id=$currentAlarmId")
+                } else if (alarm.missionType != "sequencer") {
+                    // Only care about sequencer alarms
+                    android.util.Log.d(TAG, "FORCE_RESTART_CHECK: Not a sequencer alarm, skipping")
+                } else {
+                    // Get MissionSequencer instance
                     val mainActivity = MainActivity.getInstance()
-                    val sequencer = mainActivity?.missionSequencer
-                    val queueSize = sequencer?.getQueueSize() ?: 0
-                    val currentMission = sequencer?.getCurrentMission()
-                    
-                    android.util.Log.d(TAG, "FORCE_RESTART_CHECK: alarmId=$currentAlarmId queueSize=$queueSize currentMission=${currentMission?.id}")
-                    
-                    // If queue is empty and no current mission, this is likely a force restart
-                    if (queueSize == 0 && currentMission == null) {
-                        android.util.Log.d(TAG, "Detected force restart sequencer: rebuilding mission queue for alarmId=$currentAlarmId")
-                        
-                        // Parse mission names from missionPassword field (e.g., "Tap+Pwd")
-                        val missionNames = alarm.missionPassword ?: ""
-                        val missionIds = missionNames.split("+").map { it.trim().lowercase() }
-                            .map { mission ->
-                                when (mission) {
-                                    "tap" -> "tap"
-                                    "pwd", "password" -> "password"
-                                    else -> mission
-                                }
-                            }
-                            .filter { it.isNotEmpty() && it != "none" }
-                        
-                        android.util.Log.d(TAG, "Parsed mission IDs for force restart sequencer: $missionIds")
-                        
-                        // Create mission specs from the parsed mission IDs
-                        val specs = missionIds.map { missionId ->
-                            val safeMissionId = missionId
-                            val timeoutMs = if (safeMissionId == "tap") 105000L else 30000L
-                            android.util.Log.d(TAG, "Creating mission spec for force restart sequencer: $safeMissionId (timeout: $timeoutMs)")
-                            com.vaishnava.alarm.sequencer.MissionSpec(
-                                id = safeMissionId,
-                                params = mapOf("mission_type" to safeMissionId),
-                                timeoutMs = timeoutMs,
-                                retryCount = 3,
-                                sticky = true,
-                                retryDelayMs = 1000L
-                            )
+                    var sequencer = mainActivity?.missionSequencer
+
+                    if (sequencer == null) {
+                        // App was killed, try to create sequencer with DPS context
+                        android.util.Log.d(TAG, "FORCE_RESTART: MainActivity null, creating MissionSequencer in DPS context for alarmId=$currentAlarmId")
+                        val dpsContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                            createDeviceProtectedStorageContext()
+                        } else {
+                            this@AlarmForegroundService
                         }
                         
-                        // Enqueue all missions
-                        sequencer?.enqueueAll(specs)
-                        android.util.Log.d(TAG, "Enqueued ${specs.size} missions for force restart sequencer")
+                        // CRITICAL FIX: Add notification to show what data is available during force restart
+                        try {
+                            val alarmStorage = com.vaishnava.alarm.AlarmStorage(dpsContext)
+                            val allAlarms = alarmStorage.getAlarms()
+                            val sequencerAlarms = allAlarms.filter { it.missionType == "sequencer" }
+                            android.util.Log.d("FORCE_RESTART_SERVICE", "AlarmForegroundService: Found ${sequencerAlarms.size} sequencer alarms out of ${allAlarms.size} total")
+                            sequencerAlarms.take(3).forEach { alarm ->
+                                android.util.Log.d("FORCE_RESTART_SAMPLE", "ID=${alarm.id}, Type=${alarm.missionType}, Password=${alarm.missionPassword}")
+                            }
+                            
+                            // Also check DPS data
+                            val dpsPrefs = dpsContext.getSharedPreferences("direct_boot_alarm_prefs", Context.MODE_PRIVATE)
+                            sequencerAlarms.forEach { alarm ->
+                                val dpsType = dpsPrefs.getString("direct_boot_mission_type_${alarm.id}", "not_found")
+                                val dpsPassword = dpsPrefs.getString("direct_boot_mission_password_${alarm.id}", "not_found")
+                                android.util.Log.d("FORCE_RESTART_DPS", "Alarm ${alarm.id}: DPS Type=$dpsType, DPS Password=$dpsPassword")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("FORCE_RESTART_SERVICE", "Failed to read alarm data in force restart", e)
+                        }
                         
-                        // Start the sequencer
-                        sequencer?.startWhenAlarmFires(alarm.ringtoneUri)
-                        android.util.Log.d(TAG, "Started sequencer for force restart: alarmId=$currentAlarmId")
+                        sequencer = com.vaishnava.alarm.sequencer.MissionSequencer(dpsContext)
+                        
+                        // Store the sequencer for activity to access
+                        forceRestartSequencer = sequencer
+                        
+                        // Wait a moment for async initialization to complete
+                        Thread.sleep(100)
+                    }
+
+                    // If sequencer already has a current mission, do NOT rebuild – this is not a force restart
+                    val existingMission = sequencer.getCurrentMission()
+                    if (existingMission != null) {
+                        android.util.Log.d(TAG, "FORCE_RESTART_CHECK: Sequencer already has currentMission=${existingMission.id}, skipping restore")
+                    } else {
+                        android.util.Log.d(TAG, "FORCE_RESTART_DETECTED: Restoring exact mission sequence from missionPassword for alarmId=$currentAlarmId")
+
+                        // --- Parse missionPassword into ordered mission IDs ---
+
+                        // Example missionPassword values:
+                        //  "Tap+Pwd", "Pwd+Tap", "tap+password"
+                        val missionPasswordRaw = alarm.missionPassword.orEmpty().trim()
+                        if (missionPasswordRaw.isEmpty()) {
+                            android.util.Log.w(TAG, "FORCE_RESTART_RESTORE_ABORT: missionPassword empty for sequencer alarmId=$currentAlarmId")
+                        } else {
+                            val missionIds: List<String> = missionPasswordRaw
+                                .split("+")
+                                .map { it.trim().lowercase() }
+                                .mapNotNull { mission ->
+                                    when (mission) {
+                                        "tap" -> "tap"
+                                        "pwd", "password", "pswd" -> "password"
+                                        "none", "" -> null
+                                        else -> {
+                                            android.util.Log.w(TAG, "FORCE_RESTART_RESTORE_WARN: Unknown mission token '$mission' in missionPassword='$missionPasswordRaw'")
+                                            null
+                                        }
+                                    }
+                                }
+
+                            if (missionIds.isEmpty()) {
+                                android.util.Log.w(TAG, "FORCE_RESTART_RESTORE_ABORT: No valid missions parsed from missionPassword='$missionPasswordRaw' for alarmId=$currentAlarmId")
+                            } else {
+                                // --- Build MissionSpec list preserving exact original order ---
+
+                                val specs = missionIds.map { missionId ->
+                                    val timeoutMs = when (missionId) {
+                                        "tap" -> 105_000L   // tap mission timeout
+                                        "password" -> 30_000L
+                                        else -> 30_000L
+                                    }
+
+                                    com.vaishnava.alarm.sequencer.MissionSpec(
+                                        id = missionId,
+                                        params = mapOf(
+                                            "mission_type" to missionId,
+                                            "alarm_id" to currentAlarmId.toString()
+                                        ),
+                                        timeoutMs = timeoutMs,
+                                        retryCount = 3,
+                                        sticky = true,
+                                        retryDelayMs = 1_000L
+                                    )
+                                }
+
+                                if (specs.isEmpty()) {
+                                    android.util.Log.w(TAG, "FORCE_RESTART_RESTORE_ABORT: Built empty MissionSpec list for alarmId=$currentAlarmId")
+                                } else {
+                                    // --- Enqueue and start sequencer in the correct order ---
+
+                                    // Clear any existing queue to avoid duplicates
+                                    sequencer.getQueueStore().clearQueue()
+                                    
+                                    // Enqueue missions in the exact original order
+                                    sequencer.enqueueAll(specs)
+
+                                    // Start the sequencer immediately and process first mission
+                                    sequencer.startWhenAlarmFires(alarm.ringtoneUri)
+                                    
+                                    // CRITICAL FIX: Explicitly start the first mission after enqueue
+                                    kotlinx.coroutines.GlobalScope.launch {
+                                        delay(100) // Small delay to ensure queue is processed
+                                        sequencer.tryProcessNextMission()
+                                    }
+                                    
+                                    // Give more time for the first mission to start and be saved to DPS
+                                    Thread.sleep(500)
+
+                                    android.util.Log.d(
+                                        TAG,
+                                        "FORCE_RESTART_SEQUENCE_RESTORED: ${specs.size} missions restored in original order=$missionIds for alarmId=$currentAlarmId"
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             } catch (e: Exception) {
-                android.util.Log.e(TAG, "Error handling force restart sequencer: alarmId=$currentAlarmId, error: ${e.message}")
+                android.util.Log.e(TAG, "Error restoring mission sequence after force restart for alarmId=$currentAlarmId", e)
             }
         }
 
@@ -902,15 +1068,20 @@ class AlarmForegroundService : Service() {
                     putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri?.toString())
                     putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, currentRepeatDays)
                     if (isWakeCheckLaunch) putExtra("from_wake_check", true)
+                    
+                    // Pass mission data for Direct Boot restoration
+                    currentMissionType?.let { putExtra("mission_type", it) }
+                    currentMissionPassword?.let { putExtra("mission_password", it) }
+                    putExtra("is_protected", currentIsProtected)
                 }
                 startActivity(immediateIntent)
                 android.util.Log.d("WakeCheckDebug", "AlarmForegroundService: started immediate activity for alarmId=$currentAlarmId isWakeCheckLaunch=$isWakeCheckLaunch")
             } catch (_: Exception) { }
 
-            // Also schedule delayed launch as backup
-            if (launcherScheduled.compareAndSet(false, true)) {
-                bgHandler.postDelayed(activityLauncher, 50) // Reduced delay to 50ms for faster response
-            }
+                // Also schedule delayed launch as backup
+                if (launcherScheduled.compareAndSet(false, true)) {
+                    bgHandler.postDelayed(activityLauncher, 50) // Reduced delay to 50ms for faster response
+                }
             } else {
                 android.util.Log.d("WakeCheckDebug", "AlarmForegroundService: SKIPPING immediate activity launch for sequencer alarm $currentAlarmId - MissionSequencer will handle it")
             }
@@ -1709,12 +1880,32 @@ private fun shutdownTTSForensic() {
     }
 
     private fun createFullScreenIntent(): PendingIntent {
+        // Get current mission data to pass to AlarmActivity
+        var localMissionType: String? = currentMissionType
+        var localMissionPassword: String? = currentMissionPassword
+        var localIsProtected: Boolean = currentIsProtected
+        
+        // If no mission data available, try to get from alarm storage
+        if (localMissionType == null) {
+            try {
+                val alarm = alarmStorage.getAlarm(currentAlarmId)
+                localMissionType = alarm?.missionType
+                localMissionPassword = alarm?.missionPassword
+                localIsProtected = alarm?.isProtected ?: false
+            } catch (_: Exception) { }
+        }
+        
         val intent = Intent(this, AlarmActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
             putExtra(AlarmReceiver.ALARM_ID, currentAlarmId)
             putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri?.toString())
             putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, currentRepeatDays)
             if (isWakeCheckLaunch) putExtra("from_wake_check", true)
+            
+            // Pass mission data for Direct Boot restoration
+            localMissionType?.let { putExtra("mission_type", it) }
+            localMissionPassword?.let { putExtra("mission_password", it) }
+            putExtra("is_protected", localIsProtected)
             
             // Check if this is a sequencer alarm and add sequencer flags
             val alarm = try {

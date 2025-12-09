@@ -351,7 +351,7 @@ class MainActivity : BaseActivity() {
 
                             val finalDays = if (days.isEmpty()) null else days.toList()
 
-                            // CRITICAL FIX: If missionPassword contains "+", it's a sequence - set missionType to "sequencer"
+                            // CRITICAL FIX: Never store "none" - convert to empty string
                             val actualMissionType = if (!missionPassword.isNullOrEmpty() && missionPassword.contains("+")) {
                                 Log.d("MainActivity", "Auto-setting missionType to 'sequencer' for sequence password: $missionPassword")
                                 "sequencer"
@@ -359,6 +359,15 @@ class MainActivity : BaseActivity() {
                                 missionType
                             }
 
+                            // CRITICAL FIX: For password missions, use default password if none provided
+                            val finalMissionPassword = when {
+                                actualMissionType == "password" && missionPassword.isNullOrEmpty() -> {
+                                    Log.d("MainActivity", "Using default password for password mission")
+                                    "IfYouWantYouCanSleep"
+                                }
+                                else -> missionPassword
+                            }
+                            
                             val alarm = com.vaishnava.alarm.data.Alarm(
                                 id = alarmId,
                                 hour = hour,
@@ -368,7 +377,7 @@ class MainActivity : BaseActivity() {
                                 days = finalDays,
                                 isProtected = isProtected,
                                 missionType = actualMissionType,
-                                missionPassword = missionPassword,
+                                missionPassword = finalMissionPassword,
                                 wakeCheckEnabled = wakeCheckEnabled,
                                 wakeCheckMinutes = wakeCheckMinutes,
                                 repeatDaily = finalDays != null && finalDays.size == 7,
@@ -386,7 +395,7 @@ class MainActivity : BaseActivity() {
                                 )
 
                                 dpsPrefs.edit()
-                                    .putString("direct_boot_mission_type_${alarm.id}", alarm.missionType ?: "none")
+                                    .putString("direct_boot_mission_type_${alarm.id}", alarm.missionType ?: "")
                                     .putString("direct_boot_mission_password_${alarm.id}", alarm.missionPassword ?: "")
                                     .putString("direct_boot_ringtone_${alarm.id}", alarm.ringtoneUri?.toString())
                                     .putBoolean("direct_boot_is_protected_${alarm.id}", alarm.isProtected)
@@ -1670,12 +1679,30 @@ fun AlarmScreenContent(
                                 }
                             },
                             onTimeEdit = { alarmToEdit, newHour, newMinute, newRingtoneUri, newDays, newMissionType, newMissionPassword, newIsProtected, newWakeCheckEnabled, newWakeCheckMinutes ->
-                                // CRITICAL FIX: If missionPassword contains "+", it's a sequence - set missionType to "sequencer"
+                                // CRITICAL FIX: Never store "none" - convert to empty string or infer from missionPassword
                                 val actualMissionType = if (!newMissionPassword.isNullOrEmpty() && newMissionPassword.contains("+")) {
                                     Log.d("MainActivity", "Auto-setting missionType to 'sequencer' for updated sequence password: $newMissionPassword")
                                     "sequencer"
+                                } else if (newMissionType == "none" || newMissionType.isNullOrEmpty()) {
+                                    // If user selected "none" or no mission, infer from missionPassword
+                                    when {
+                                        newMissionPassword.isNullOrEmpty() -> ""
+                                        newMissionPassword.contains("+") -> "sequencer"
+                                        newMissionPassword.lowercase().contains("pwd") || 
+                                        newMissionPassword.lowercase().contains("password") -> "password"
+                                        else -> "tap"
+                                    }
                                 } else {
                                     newMissionType
+                                }
+                                
+                                // CRITICAL FIX: For password missions, use default password if none provided
+                                val finalMissionPassword = when {
+                                    actualMissionType == "password" && newMissionPassword.isNullOrEmpty() -> {
+                                        Log.d("MainActivity", "Using default password for updated password mission")
+                                        "IfYouWantYouCanSleep"
+                                    }
+                                    else -> newMissionPassword
                                 }
                                 
                                 // Update the alarm with all new values and mark time change as used
@@ -1685,7 +1712,7 @@ fun AlarmScreenContent(
                                     ringtoneUri = newRingtoneUri,
                                     days = newDays?.toList(),
                                     missionType = actualMissionType,
-                                    missionPassword = newMissionPassword,
+                                    missionPassword = finalMissionPassword,
                                     isProtected = newIsProtected,
                                     wakeCheckEnabled = newWakeCheckEnabled,
                                     wakeCheckMinutes = newWakeCheckMinutes,
@@ -1708,7 +1735,7 @@ fun AlarmScreenContent(
                                     dpsPrefs.edit()
                                         .putString(
                                             "direct_boot_mission_type_${updatedAlarm.id}",
-                                            updatedAlarm.missionType ?: "none"
+                                            updatedAlarm.missionType ?: ""
                                         )
                                         .putString(
                                             "direct_boot_mission_password_${updatedAlarm.id}",

@@ -26,6 +26,23 @@ class AlarmReceiver : BroadcastReceiver() {
         const val EXTRA_RINGTONE_URI = "extra_ringtone_uri"
         const val EXTRA_REPEAT_DAYS = "extra_repeat_days"
         
+        /**
+         * CRITICAL FIX: Get DPS-first AlarmStorage for Direct Boot compatibility
+         */
+        private fun getDpsAlarmStorage(context: Context): AlarmStorage {
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    val deviceContext = context.createDeviceProtectedStorageContext()
+                    AlarmStorage(deviceContext)
+                } else {
+                    AlarmStorage(context)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to create DPS AlarmStorage, using regular storage", e)
+                AlarmStorage(context)
+            }
+        }
+        
         private fun writeExternalLog(context: Context, message: String) {
             try {
                 val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
@@ -137,7 +154,7 @@ class AlarmReceiver : BroadcastReceiver() {
                     val sequencer = mainActivity?.missionSequencer
                     if (sequencer != null && mainActivity != null) {
                         // Get the alarm details to rebuild the mission queue
-                        val alarmStorage = com.vaishnava.alarm.AlarmStorage(context)
+                        val alarmStorage = getDpsAlarmStorage(context)
                         val alarm = alarmStorage.getAlarm(alarmId)
                         if (alarm != null && alarm.missionType == "sequencer") {
                             Log.d(TAG, "Rebuilding mission queue for missed sequencer alarm: alarmId=$alarmId")
@@ -305,7 +322,7 @@ class AlarmReceiver : BroadcastReceiver() {
 
         // Try to retrieve persisted alarm from AlarmStorage (if present)
         val storageAlarm: Alarm? = try {
-            val storage = AlarmStorage(context)
+            val storage = getDpsAlarmStorage(context)
             storage.getAlarm(alarmId)
         } catch (e: Exception) {
             Log.w(TAG, "AlarmStorage lookup failed: ${e.message}")
@@ -393,6 +410,22 @@ class AlarmReceiver : BroadcastReceiver() {
                     putExtra(ALARM_ID, alarm.id)
                     putExtra(EXTRA_RINGTONE_URI, alarm.ringtoneUri)
                     putExtra(EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
+                    // CRITICAL: Pass mission data and cache in background service
+                    val alarmMissionType = alarm.missionType?.let { if (it == "none") "" else it } ?: ""
+                    putExtra("mission_type", alarmMissionType)
+                    putExtra("mission_password", alarm.missionPassword ?: "")
+                    
+                    // Cache mission data in background service for screen-off scenarios
+                    try {
+                        val cacheIntent = Intent(context, AlarmDataService::class.java)
+                        cacheIntent.action = "CACHE_ALARM_DATA"
+                        cacheIntent.putExtra("alarm_id", alarm.id)
+                        cacheIntent.putExtra("mission_type", alarmMissionType)
+                        cacheIntent.putExtra("mission_password", alarm.missionPassword ?: "")
+                        context.startService(cacheIntent)
+                    } catch (e: Exception) {
+                        // Silent fail - continue with normal flow
+                    }
                 }
                 context.startActivity(act)
             } catch (e: Exception) {
@@ -402,7 +435,7 @@ class AlarmReceiver : BroadcastReceiver() {
         
         // Start sequencer missions ONLY when sequencer alarm fires (not wake-up follow-ups)
         // CRITICAL FIX: Never start sequencer for alarms with missionType = "none"
-        Log.d(TAG, "SEQUENCER_CHECK: isWakeUpFollowUp=$isWakeUpFollowUp alarm.missionType=${alarm.missionType} alarm.id=${alarm.id}")
+        Log.d(TAG, "SEQUENCER_CHECK: isWakeUpFollowUp=$isWakeUpFollowUp alarm.missionType=${alarm.missionType?.let { if (it == "none") "" else it }} alarm.id=${alarm.id}")
         if (!isWakeUpFollowUp && alarm.missionType == "sequencer") {
             try {
                 val sequencer = MainActivity.getInstance()?.missionSequencer
@@ -448,6 +481,10 @@ class AlarmReceiver : BroadcastReceiver() {
                     putExtra("from_wake_check", true)
                     // Ensure ringtone Uri is available so UI can always resolve name
                     putExtra(EXTRA_RINGTONE_URI, alarm.ringtoneUri)
+                    // CRITICAL: Add mission data for wake-up check follow-up
+                    val missionType = alarm.missionType?.let { if (it == "none") "" else it } ?: ""
+                    putExtra("mission_type", missionType)
+                    putExtra("mission_password", alarm.missionPassword ?: "")
                 }
                 context.startActivity(act)
             } catch (e: Exception) {
@@ -477,7 +514,7 @@ class AlarmReceiver : BroadcastReceiver() {
             } else {
                 // One-shot without wake-check: mark disabled as before
                 try {
-                    val storage = AlarmStorage(context)
+                    val storage = getDpsAlarmStorage(context)
                     try {
                         storage.disableAlarm(alarm.id)
                         Log.d(TAG, "Marked one-shot alarm ${alarm.id} disabled in storage")

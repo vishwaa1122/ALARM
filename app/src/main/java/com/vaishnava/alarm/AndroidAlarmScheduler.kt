@@ -55,6 +55,13 @@ class AndroidAlarmScheduler(private val context: Context) : AlarmScheduler {
             putExtra("hour", alarm.hour)
             putExtra("minute", alarm.minute)
             putExtra("repeatDaily", alarm.repeatDaily)
+            
+            // CRITICAL FIX: Include mission information in the pending intent
+            putExtra("mission_type", alarm.missionType ?: "")
+            putExtra("mission_password", alarm.missionPassword ?: "")
+            putExtra("is_protected", alarm.isProtected)
+            putExtra("wake_check_enabled", alarm.wakeCheckEnabled)
+            putExtra("wake_check_minutes", alarm.wakeCheckMinutes)
         }
 
         Log.d(

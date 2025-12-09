@@ -105,7 +105,9 @@ class AlarmActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "AlarmActivity"
+        const val DEFAULT_GLOBAL_PASSWORD = "IfYouWantYouCanSleep"
 
+        
         private fun writePersistentLog(message: String) {
             try {
                 val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
@@ -272,10 +274,11 @@ class AlarmActivity : ComponentActivity() {
     private var requiredPassword: String? = null
     private val DEFAULT_GLOBAL_PASSWORD = "IfYouWantYouCanSleep"
 
+    
     private enum class TimerState { StartupBlocked, InitialEntry, Blocked, Idle }
 
     private val STARTUP_BLOCKED_TIME_SECONDS = 90     // 90s (after Start Mission)
-    private val INITIAL_PASSWORD_ENTRY_TIME_SECONDS = 30  // 30s entry window
+    private val INITIAL_PASSWORD_ENTRY_TIME_SECONDS = 60  // 60s entry window
     private val BLOCKED_TIME_SECONDS = 120            // 120s lockout
 
     private var timerState = TimerState.Idle
@@ -582,8 +585,22 @@ class AlarmActivity : ComponentActivity() {
 
         // Load config & TTS (only for initial alarm launches, not wake-check follow-ups)
         val isWakeCheckAlarm: Boolean = try {
-            val storage = AlarmStorage(applicationContext)
-            val alarm = storage.getAlarms().find { it.id == alarmId }
+            // SIMPLIFIED: Use Intent extras first, storage only if absolutely needed
+            var alarm: com.vaishnava.alarm.data.Alarm? = null
+            
+            // Only try to get alarm from storage if Intent extras are missing
+            val hasIntentExtras = intent?.getStringExtra("mission_type") != null
+            if (!hasIntentExtras) {
+                try {
+                    val storage = AlarmStorage(applicationContext)
+                    alarm = storage.getAlarm(alarmId)
+                    Log.d(TAG, "STORAGE_FALLBACK: Got alarm from storage since Intent extras missing")
+                } catch (e: Exception) {
+                    Log.w(TAG, "STORAGE_FALLBACK: Failed to get alarm from storage", e)
+                }
+            } else {
+                Log.d(TAG, "STORAGE_SKIP: Using Intent extras, no storage access needed")
+            }
             
             // CRITICAL FIX: Detect sequencer missions by checking alarm missionType, not just intent extra
             // This ensures sequencer detection works during force restart when EXTRA_FROM_SEQUENCER is not set
@@ -594,96 +611,22 @@ class AlarmActivity : ComponentActivity() {
             
             Log.d(TAG, "CONFIG_LOAD_START: alarmId=$alarmId isSequencerMission=$isSequencerMission sequencerContext=$sequencerContext hasAlarm=${alarm != null}")
 
-            // For sequencer missions, always use fallback logic to ensure correct mission type
-            val persistedMissionType = if (isSequencerMission) {
-                val missionType = intent?.getStringExtra("mission_type")
-                val missionId = intent?.getStringExtra("mission_id")
-                
-                // Always use fallback for sequencer missions to get correct mission
-                try {
-                    val mainActivity = MainActivity.getInstance()
-                    var sequencer = mainActivity?.missionSequencer
-                    
-                    if (sequencer == null) {
-                        // MainActivity is null (force restart), read current mission directly from DPS
-                        try {
-                            val dpsContext = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                                createDeviceProtectedStorageContext()
-                            } else {
-                                this
-                            }
-                            val queueStore = com.vaishnava.alarm.sequencer.MissionQueueStore(dpsContext)
-                            val savedCurrentMission = queueStore.loadCurrentMission()
-                            val mission = savedCurrentMission?.first
-                            
-                            if (mission != null) {
-                                val actualMissionType = mission.params["mission_type"] ?: mission.id
-                                intent?.putExtra("mission_id", mission.id)
-                                intent?.putExtra("mission_type", actualMissionType)
-                                currentMissionId = mission.id
-                                actualMissionType
-                            } else {
-                                // No saved mission, use first from missionPassword
-                                val missionNames = alarm?.missionPassword ?: ""
-                                if (missionNames.isNotEmpty()) {
-                                    val firstMission = missionNames.split("+").first().trim().lowercase()
-                                    val actualMissionType = when (firstMission) {
-                                        "tap" -> "tap"
-                                        "pwd", "password", "pswd" -> "password"
-                                        else -> firstMission
-                                    }
-                                    intent?.putExtra("mission_id", firstMission)
-                                    intent?.putExtra("mission_type", actualMissionType)
-                                    currentMissionId = firstMission
-                                    actualMissionType
-                                } else {
-                                    "unknown"
-                                }
-                            }
-                        } catch (_: Exception) {
-                            "unknown"
-                        }
-                    } else {
-                        val currentMission = sequencer.getCurrentMission()
-                        
-                        if (currentMission != null) {
-                            val actualMissionType = currentMission.params["mission_type"] ?: currentMission.id
-                            intent?.putExtra("mission_id", currentMission.id)
-                            intent?.putExtra("mission_type", actualMissionType)
-                            currentMissionId = currentMission.id
-                            actualMissionType
-                        } else {
-                            // Fallback: For force restart, always show first mission interface
-                            try {
-                                val missionNames = alarm?.missionPassword ?: ""
-                                if (missionNames.isNotEmpty()) {
-                                    // Always get first mission from missionPassword (e.g., "Tap+Pwd" -> "Tap")
-                                    val firstMission = missionNames.split("+").first().trim().lowercase()
-                                    val actualMissionType = when (firstMission) {
-                                        "tap" -> "tap"
-                                        "pwd", "password", "pswd" -> "password"
-                                        else -> firstMission
-                                    }
-                                    intent?.putExtra("mission_id", firstMission)
-                                    intent?.putExtra("mission_type", actualMissionType)
-                                    currentMissionId = firstMission
-                                    actualMissionType
-                                } else {
-                                    "unknown"
-                                }
-                            } catch (_: Exception) {
-                                "unknown"
-                            }
-                        }
-                    }
-                } catch (_: Exception) {
-                    "unknown"
-                }
-            } else {
-                alarm?.missionType ?: ""
-            }
+            // CRITICAL FIX: Use ONLY Intent extras - no storage access whatsoever
+            val intentMissionType = intent?.getStringExtra("mission_type") ?: ""
+            val intentMissionPassword = intent?.getStringExtra("mission_password") ?: ""
+            
+            Log.d(TAG, "INTENT_ONLY: alarmId=$alarmId missionType=$intentMissionType missionPassword=$intentMissionPassword")
+            
+            // Use ONLY Intent extras - never access storage
+            val persistedMissionType = intentMissionType
             missionTapEnabled = (persistedMissionType == "tap")
-            requiredPassword = getActualPassword(alarm, persistedMissionType)
+            requiredPassword = if (intentMissionPassword.isNotEmpty()) {
+                intentMissionPassword
+            } else if (persistedMissionType == "password") {
+                DEFAULT_GLOBAL_PASSWORD
+            } else {
+                null
+            }
 
             Log.d(TAG, "MISSION_CONFIG: alarmId=$alarmId isSequencer=$isSequencerMission missionType=$persistedMissionType tapEnabled=$missionTapEnabled hasPassword=${requiredPassword != null} requiredPassword=$requiredPassword alarmMissionType=${alarm?.missionType} alarmMissionPassword=${alarm?.missionPassword}")
 
@@ -729,8 +672,20 @@ class AlarmActivity : ComponentActivity() {
 
                 // Check if silence_no_sound is selected - if so, don't use TTS
                 val isSilenceRingtone = try {
-                    val storage = AlarmStorage(applicationContext)
-                    val alarm = storage.getAlarms().find { it.id == alarmId }
+                    // CRITICAL FIX: Use safe storage approach for Direct Boot compatibility
+                    val alarm = try {
+                        val safeStorage = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                            AlarmStorage(createDeviceProtectedStorageContext())
+                        } else {
+                            AlarmStorage(applicationContext)
+                        }
+                        safeStorage.getAlarms().find { it.id == alarmId }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to get alarm from device-protected storage for TTS check, trying smart storage", e)
+                        val regularStorage = AlarmStorage(applicationContext)
+                        regularStorage.getAlarms().find { it.id == alarmId }
+                    }
+                    
                     val ringtoneUri = alarm?.ringtoneUri?.toString()
                     Log.d(TAG, "TTS_CHECK: alarmId=$alarmId ringtoneUri=$ringtoneUri")
 
@@ -909,6 +864,26 @@ class AlarmActivity : ComponentActivity() {
 
             Log.d(TAG, "onNewIntent: alarmId=$alarmId fromSequencer=$fromSequencer sequencerComplete=$sequencerComplete")
 
+            // CRITICAL FIX: Use Intent-only approach for normal missions (not from sequencer)
+            if (!fromSequencer && !sequencerComplete) {
+                val intentMissionType = intent.getStringExtra("mission_type") ?: ""
+                val intentMissionPassword = intent.getStringExtra("mission_password") ?: ""
+                
+                Log.d(TAG, "INTENT_ONLY_ON_NEW_INTENT: alarmId=$alarmId missionType=$intentMissionType missionPassword=$intentMissionPassword")
+                
+                // Use ONLY Intent extras - never access storage
+                missionTapEnabled = (intentMissionType == "tap")
+                requiredPassword = if (intentMissionPassword.isNotEmpty()) {
+                    intentMissionPassword
+                } else if (intentMissionType == "password") {
+                    DEFAULT_GLOBAL_PASSWORD
+                } else {
+                    null
+                }
+                
+                Log.d(TAG, "INTENT_CONFIG_ON_NEW_INTENT: alarmId=$alarmId missionType=$intentMissionType tapEnabled=$missionTapEnabled hasPassword=${requiredPassword != null} requiredPassword=$requiredPassword")
+            }
+
             // CRITICAL FIX: Only handle sequencer_complete if this is NOT an active sequencer mission
             if (sequencerComplete && !isSequencerMission) {
                 Log.d(TAG, "SEQUENCER_COMPLETE: Multi-mission sequence completed, dismissing alarm")
@@ -946,12 +921,13 @@ class AlarmActivity : ComponentActivity() {
             if (fromSequencer) {
                 currentMissionId = intent.getStringExtra("mission_id")
                 val missionType = intent.getStringExtra("mission_type")
-                Log.d(TAG, "SEQUENCER_MISSION_UPDATE: missionId=$currentMissionId missionType=$missionType")
+                val missionPassword = intent.getStringExtra("mission_password") ?: ""
+                Log.d(TAG, "SEQUENCER_MISSION_UPDATE: missionId=$currentMissionId missionType=$missionType missionPassword=$missionPassword")
                 
-                // CRITICAL FIX: Update mission configuration immediately in onNewIntent
+                // CRITICAL FIX: Use Intent extras for mission configuration
                 missionTapEnabled = (missionType == "tap")
                 this@AlarmActivity.requiredPassword = when {
-                    missionType == "password" -> DEFAULT_GLOBAL_PASSWORD
+                    missionType == "password" -> if (missionPassword.isNotEmpty()) missionPassword else DEFAULT_GLOBAL_PASSWORD
                     else -> null // CRITICAL: Clear password for non-password missions
                 }
                 Log.d(TAG, "SEQUENCER_IMMEDIATE_CONFIG: missionType=$missionType missionTapEnabled=$missionTapEnabled requiredPassword=${this@AlarmActivity.requiredPassword != null}")
@@ -1634,9 +1610,12 @@ class AlarmActivity : ComponentActivity() {
 
             // ===== BEFORE MISSION STARTS (unified for any mission except NONE) =====
             run {
-                // For protected alarms, rely on the persisted missionType to decide if a mission exists
+                // For protected alarms,// CRITICAL FIX: Use intent-based mission detection for screen-off reliability
                 val hasMission = if (currentAlarm?.isProtected == true) {
-                    currentAlarm.missionType == "tap" || currentAlarm.missionType == "password"
+                    // For protected alarms, check intent extras first, convert "none" to empty
+                    val missionType = intent?.getStringExtra("mission_type")?.let { if (it == "none") "" else it } 
+                        ?: currentAlarm?.missionType?.let { if (it == "none") "" else it } ?: ""
+                    missionType == "tap" || missionType == "password"
                 } else {
                     (missionTapEnabled || requiredPassword != null)
                 }
@@ -1804,30 +1783,13 @@ class AlarmActivity : ComponentActivity() {
                 }
             }
 
-            // Dismiss button visibility logic:
-            // Show dismiss button when:
-            // 1. For protected alarms: only when mission type is "none"
-            // 2. For regular alarms: when no mission is required (none mission type)
-            // 3. Always: must not be already dismissed, gate inactive, and tap mission not enabled
-            // 4. NEVER show dismiss button during wake-up check
-            val isProtectedAlarm = currentAlarm?.isProtected == true
-            val missionTypeIsNone = currentAlarm?.missionType == "none" || currentAlarm?.missionType.isNullOrEmpty()
-            val hasNoPassword = requiredPassword == null
-            val noMissionRequired = !missionTapEnabled && hasNoPassword
-
-            // Simplified logic: For "none" mission type, always show dismiss button (unless already dismissed or in sequencer mode)
-            // BUT NEVER during wake-up check
+            // Dismiss button logic: Never show dismiss button - user must complete the mission
             val dismissButtonVisible = when {
                 // Never show dismiss button during wake-up check
                 isWakeCheckLaunchState.value -> false
-                // CRITICAL FIX: NEVER show dismiss button in sequencer mode, even after completion
+                // Never show dismiss button in sequencer mode
                 isSequencerMission || isSequencerComplete -> false
-                // If mission type is explicitly "none", show dismiss button
-                missionTypeIsNone && !isDismissed -> true
-                // Protected alarms with "none" mission type
-                isProtectedAlarm && missionTypeIsNone && !gateActive && !isDismissed -> true
-                // Regular alarms with no mission required - FIX: Show dismiss button for single alarms
-                !isProtectedAlarm && noMissionRequired && !gateActive && !isDismissed -> true
+                // Never show dismiss button - user must complete mission
                 else -> false
             }
 
@@ -1869,9 +1831,25 @@ class AlarmActivity : ComponentActivity() {
             return null
         }
         
+        // CRITICAL FIX: For Direct Boot compatibility, try to get fresh mission data if alarm is null
+        val missionPassword = if (alarm?.missionPassword == null && missionType != null) {
+            try {
+                // Use default password for sequencer missions
+                if (missionType.contains("+")) {
+                    DEFAULT_GLOBAL_PASSWORD
+                } else {
+                    null
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to get fresh mission data for password retrieval", e)
+                null
+            }
+        } else {
+            alarm?.missionPassword
+        }
+        
         // CRITICAL FIX: If mission password contains "+", it's ANY sequence (tap+password, password+tap, etc.)
         // Never use the sequence string as the actual password
-        val missionPassword = alarm?.missionPassword
         if (missionPassword?.contains("+") == true) {
             return DEFAULT_GLOBAL_PASSWORD // Use default password for any sequencer missions
         }
@@ -2038,9 +2016,10 @@ class AlarmActivity : ComponentActivity() {
             val alarm = alarmStorage.getAlarms().find { it.id == alarmId }
 
             // Only block dismissal for protected alarms with missions (password/tap)
-            // Allow dismissal for protected alarms with "none" mission type
-            if (alarm?.isProtected == true && alarm.missionType != "none") {
-                Log.w(TAG, "Attempted to dismiss protected alarm $alarmId with mission ${alarm.missionType} - blocking dismissal")
+            // Convert "none" to empty string for comparison
+            val missionType = alarm?.missionType?.let { if (it == "none") "" else it } ?: ""
+            if (alarm?.isProtected == true && missionType.isNotEmpty()) {
+                Log.w(TAG, "Attempted to dismiss protected alarm $alarmId with mission $missionType - blocking dismissal")
                 // Show a message that this alarm cannot be dismissed
                 try {
                     android.widget.Toast.makeText(
