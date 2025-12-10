@@ -147,21 +147,31 @@ class AndroidAlarmScheduler(private val context: Context) : AlarmScheduler {
                     return
                 }
                 
+                // CRITICAL FIX: Create unique PendingIntent based on mission content
+                // This prevents PendingIntent reuse between different mission configurations
+                val missionSignature = "${alarm.id}_${alarm.missionType}_${alarm.missionPassword ?: ""}"
+                val uniqueRequestCode = missionSignature.hashCode()
+                
                 val showActivityIntent = Intent(context, AlarmActivity::class.java).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                     putExtra(AlarmReceiver.ALARM_ID, alarm.id)
                     putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri)
                     putExtra(AlarmReceiver.EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
+                    // CRITICAL: Include mission data in the showIntent to ensure uniqueness
+                    // CRITICAL FIX: Block "none" missions from being launched via AndroidAlarmScheduler
+                    putExtra("mission_type", alarm.missionType?.let { if (it == "none") "" else it } ?: "")
+                    putExtra("mission_password", alarm.missionPassword ?: "")
+                    putExtra("mission_signature", missionSignature)
                 }
 
                 Log.d(
                     "AlarmScheduler",
-                    "PI_SHOW: id=${alarm.id} data=${showActivityIntent.data} extrasKeys=${showActivityIntent.extras?.keySet()?.joinToString()}"
+                    "PI_SHOW: id=${alarm.id} missionType=${alarm.missionType} missionPassword=${alarm.missionPassword} signature=$missionSignature requestCode=$uniqueRequestCode extrasKeys=${showActivityIntent.extras?.keySet()?.joinToString()}"
                 )
 
                 val showIntent = android.app.PendingIntent.getActivity(
                     context,
-                    alarm.id,
+                    uniqueRequestCode,
                     showActivityIntent,
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )

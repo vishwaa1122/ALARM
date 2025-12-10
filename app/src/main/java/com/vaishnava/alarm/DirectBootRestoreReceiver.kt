@@ -195,13 +195,21 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                 null
             }
             
+            // CRITICAL FIX: Create unique PendingIntent based on mission content
+            val missionSignature = "${ringId}_${alarm?.missionType}_${alarm?.missionPassword}"
+            val uniqueRequestCode = missionSignature.hashCode()
+            
             val showIntent: PendingIntent = if (alarm?.missionType != "sequencer") {
                 PendingIntent.getActivity(
                     actualDpsContext,
-                    ringId xor 0x0100,
+                    uniqueRequestCode,
                     Intent(actualDpsContext, AlarmActivity::class.java).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                         putExtra(AlarmReceiver.ALARM_ID, ringId)
+                        // CRITICAL FIX: Block "none" missions from being launched via DirectBoot
+                        putExtra("mission_type", alarm?.missionType?.let { if (it == "none") "" else it } ?: "")
+                        putExtra("mission_password", alarm?.missionPassword ?: "")
+                        putExtra("mission_signature", missionSignature)
                     },
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
@@ -210,10 +218,14 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                 // The MissionSequencer will handle launching the actual missions
                 PendingIntent.getBroadcast(
                     actualDpsContext,
-                    ringId xor 0x0100,
+                    uniqueRequestCode,
                     Intent(actualDpsContext, AlarmReceiver::class.java).apply {
                         action = "com.vaishnava.alarm.SEQUENCER_MISSED_ALARM"
                         putExtra(AlarmReceiver.ALARM_ID, ringId)
+                        // CRITICAL FIX: Block "none" missions from being launched via DirectBoot
+                        putExtra("mission_type", alarm?.missionType?.let { if (it == "none") "" else it } ?: "")
+                        putExtra("mission_password", alarm?.missionPassword ?: "")
+                        putExtra("mission_signature", missionSignature)
                     },
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
@@ -284,7 +296,8 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                 val svc = Intent(actualDpsContext, AlarmForegroundService::class.java).apply {
                     putExtra(AlarmReceiver.ALARM_ID, ringId)
                     putExtra(AlarmReceiver.EXTRA_RINGTONE_URI, ringtoneUri)
-                    missionType?.let { putExtra("mission_type", it) }
+                    // CRITICAL FIX: Block "none" missions from being launched via DirectBoot
+                    missionType?.let { if (it != "none") putExtra("mission_type", it) }
                     missionPassword?.let { putExtra("mission_password", it) }
                     putExtra("is_protected", isProtected)
                 }
@@ -348,7 +361,7 @@ class DirectBootRestoreReceiver : BroadcastReceiver() {
                 Log.e("AlarmApp", "DirectBootRestoreReceiver: Failed to clear was_ringing flags: ${e.message}")
             }
 
-        } catch (e: Exception) {
+        }   catch (e: Exception) {
             Log.e("AlarmApp", "DirectBootRestoreReceiver failed: ${e.message}")
         }
     }

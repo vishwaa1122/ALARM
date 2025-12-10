@@ -168,7 +168,43 @@ class MissionSequencer(private val context: Context) {
         MissionLogger.log("QUEUE_ORDER: First mission=${queue.firstOrNull()?.id} Last mission=${queue.lastOrNull()?.id}")
         
         if (queue.isEmpty()) {
-            MissionLogger.logWarning("BASIC_EMPTY_QUEUE: No missions in queue after filtering - this may indicate a completed sequencer alarm")
+            MissionLogger.logWarning("BASIC_EMPTY_QUEUE: No missions in queue - launching AlarmActivity with default mission")
+            
+            // CRITICAL FIX: Launch AlarmActivity with default mission when queue is empty
+            try {
+                val currentAlarmId = getCurrentAlarmId()
+                if (currentAlarmId != -1) {
+                    val alarmStorage = com.vaishnava.alarm.AlarmStorage(context)
+                    val alarm = alarmStorage.getAlarm(currentAlarmId)
+                    if (alarm != null) {
+                        // Launch AlarmActivity with default "tap" mission
+                        val intent = Intent(context, com.vaishnava.alarm.AlarmActivity::class.java).apply {
+                            addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                                Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT or
+                                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+                            )
+                            putExtra(com.vaishnava.alarm.AlarmReceiver.ALARM_ID, alarm.id)
+                            putExtra(com.vaishnava.alarm.AlarmReceiver.EXTRA_RINGTONE_URI, alarm.ringtoneUri)
+                            putExtra(com.vaishnava.alarm.AlarmReceiver.EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
+                            putExtra("hour", alarm.hour)
+                            putExtra("minute", alarm.minute)
+                            putExtra("repeatDaily", alarm.repeatDaily)
+                            // Use default mission when sequencer has no missions
+                            putExtra("mission_type", "tap")
+                            putExtra("mission_password", "")
+                            putExtra("is_protected", alarm.isProtected == true)
+                        }
+                        context.startActivity(intent)
+                        MissionLogger.log("EMPTY_QUEUE_LAUNCH: Launched AlarmActivity with default 'tap' mission for alarm $currentAlarmId")
+                        return
+                    }
+                }
+            } catch (e: Exception) {
+                MissionLogger.logError("EMPTY_QUEUE_LAUNCH_ERROR: Failed to launch AlarmActivity - ${e.message}")
+            }
             
             // CRITICAL FIX: Disable the sequencer alarm if queue is empty to prevent re-triggering
             try {
@@ -285,14 +321,8 @@ class MissionSequencer(private val context: Context) {
                         val queue = queueStore.loadQueue().toMutableList()
                         
                         if (queue.isNotEmpty()) {
-                            // CRITICAL: Filter out any "none" missions from queue during timeout recovery
-                            val filteredQueue = queue.filter { mission ->
-                                val isNoneMission = mission.id == "none" || mission.id.contains("none_mission") || mission.id.contains("mission_type=none")
-                                if (isNoneMission) {
-                                    MissionLogger.logWarning("TIMEOUT_QUEUE_FILTER: Removing 'none' mission from queue - missionId=${mission.id}")
-                                }
-                                !isNoneMission
-                            }
+                            // CRITICAL FIX: Don't filter out "none" missions - let them be processed
+                            val filteredQueue = queue
                             
                             if (filteredQueue.isEmpty()) {
                                 MissionLogger.log("TIMEOUT_RECOVERY_QUEUE_EMPTY: All missions filtered out, disabling sequencer alarm")
@@ -384,21 +414,11 @@ class MissionSequencer(private val context: Context) {
                 var queue = queueStore.loadQueue()
                 MissionLogger.log("PROCESS_QUEUE_STATE: queueSize=${queue.size}, firstItemId=${queue.firstOrNull()?.id ?: "<none>"}")
                 
-                // Filter out ALL "none" missions in processQueue too
+                // CRITICAL FIX: Don't filter out "none" missions - let them be processed
                 val originalSize = queue.size
-                queue = queue.filter { mission ->
-                    val isNone = mission.id == "none" || 
-                                mission.id.contains("none_mission") || 
-                                mission.id.contains("mission_type=none") ||
-                                mission.params["mission_type"] == "none"
-                    if (isNone) {
-                        MissionLogger.logWarning("PROCESS_QUEUE_FILTER: Removing 'none' mission - id=${mission.id} params=${mission.params}")
-                    }
-                    !isNone
-                }
                 
                 if (queue.size != originalSize) {
-                    MissionLogger.logWarning("PROCESS_QUEUE_FILTER: Removed ${originalSize - queue.size} 'none' missions, saving cleaned queue")
+                    MissionLogger.logWarning("PROCESS_QUEUE_FILTER: Removed ${originalSize - queue.size} missions, saving cleaned queue")
                     queueStore.saveQueue(queue)
                 }
                 
@@ -612,6 +632,13 @@ class MissionSequencer(private val context: Context) {
                         putExtra("mission_id", safeMission.id)
                         // CRITICAL FIX: Always use mission.id as mission_type for consistency (after conversion)
                         val missionType = safeMission.id
+                        
+                        // CRITICAL FIX: Block "none" missions from being launched
+                        if (missionType == "none" || missionType.contains("none_mission") || missionType.contains("mission_type=none")) {
+                            MissionLogger.logWarning("LAUNCH_BLOCKED: Blocking 'none' mission from being launched - missionId=$missionType")
+                            return@launch
+                        }
+                        
                         putExtra("mission_type", missionType)
                         // CRITICAL FIX: Add mission_password for Intent-only approach
                         val missionPassword = if (missionType == "password") DEFAULT_GLOBAL_PASSWORD else ""
@@ -758,46 +785,39 @@ class MissionSequencer(private val context: Context) {
                             handleSequencerComplete()
                         } else {
                             MissionLogger.log("ADVANCE_QUEUE_NEXT: id=$advanceId remaining=${queue.size}")
-                            // Start next mission with a small delay to prevent black screen race condition
-                            val nextMission = queue.first()
-                            MissionLogger.log("ADVANCE_QUEUE_STARTING_NEXT: id=$advanceId nextMissionId=${nextMission.id} nextMissionType=${nextMission.params["mission_type"]}")
                             
-                            // CRITICAL FIX: Block "none" missions from being started in success path
-                            if (nextMission.id == "none" || nextMission.id.contains("none_mission") || nextMission.id.contains("mission_type=none")) {
-                                MissionLogger.logWarning("ADVANCE_QUEUE_BLOCKED_NONE: Blocking 'none' mission from starting - missionId=${nextMission.id}")
+                            // CRITICAL FIX: Filter out "none" missions from remaining queue for multi-mission sequences
+                            val filteredQueue = queue.filter { mission ->
+                                val isNoneMission = mission.id == "none" || 
+                                                mission.id.contains("none_mission") || 
+                                                mission.id.contains("mission_type=none") ||
+                                                mission.params["mission_type"] == "none"
                                 
-                                // Remove the "none" mission from queue and continue with next
-                                val updatedQueue = queue.toMutableList()
-                                updatedQueue.removeAt(0)
-                                queueStore.saveQueue(updatedQueue)
-                                MissionLogger.log("ADVANCE_QUEUE_REMOVED_NONE: removed 'none' mission, remaining=${updatedQueue.size}")
-                                
-                                // Try to start the next mission after removing "none"
-                                if (updatedQueue.isNotEmpty()) {
-                                    val afterNoneMission = updatedQueue.first()
-                                    MissionLogger.log("ADVANCE_QUEUE_AFTER_NONE: starting mission after 'none' - missionId=${afterNoneMission.id}")
-                                    
-                                    // Remove that mission too and start it
-                                    val finalQueue = updatedQueue.toMutableList()
-                                    finalQueue.removeAt(0)
-                                    queueStore.saveQueue(finalQueue)
-                                    
-                                    currentMission = afterNoneMission
-                                    isProcessing = true
-                                    
-                                    scope.launch {
-                                        delay(300)
-                                        startMission(afterNoneMission)
-                                    }
-                                } else {
-                                    MissionLogger.log("ADVANCE_QUEUE_EMPTY_AFTER_NONE: No more missions after removing 'none', completing sequencer")
-                                    handleSequencerComplete()
+                                if (isNoneMission) {
+                                    MissionLogger.logWarning("ADVANCE_QUEUE_FILTER: Filtering out 'none' mission from remaining queue - missionId=${mission.id}")
                                 }
+                                
+                                !isNoneMission
+                            }
+                            
+                            // Save the filtered queue if any "none" missions were removed
+                            if (filteredQueue.size != queue.size) {
+                                queueStore.saveQueue(filteredQueue)
+                                MissionLogger.logWarning("ADVANCE_QUEUE_FILTERED: Removed ${queue.size - filteredQueue.size} 'none' missions from remaining queue, new size=${filteredQueue.size}")
+                            }
+                            
+                            if (filteredQueue.isEmpty()) {
+                                MissionLogger.log("ADVANCE_QUEUE_EMPTY_AFTER_FILTER: No more missions after filtering 'none', completing sequencer")
+                                handleSequencerComplete()
                                 return@withLock
                             }
                             
+                            // Start next mission with a small delay to prevent black screen race condition
+                            val nextMission = filteredQueue.first()
+                            MissionLogger.log("ADVANCE_QUEUE_STARTING_NEXT: id=$advanceId nextMissionId=${nextMission.id} nextMissionType=${nextMission.params["mission_type"]}")
+                            
                             // CRITICAL FIX: Remove the next mission from queue before starting it
-                            val updatedQueue = queue.toMutableList()
+                            val updatedQueue = filteredQueue.toMutableList()
                             updatedQueue.removeAt(0)
                             queueStore.saveQueue(updatedQueue)
                             MissionLogger.log("ADVANCE_QUEUE_REMOVED_NEXT: id=$advanceId removedMissionId=${nextMission.id} remaining=${updatedQueue.size}")

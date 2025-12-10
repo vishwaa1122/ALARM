@@ -267,22 +267,111 @@ class MainActivity : BaseActivity() {
         val fromMissedSequencerAlarm = intent.getBooleanExtra("from_missed_sequencer_alarm", false)
         val missedSequencerAlarmId = intent.getIntExtra(AlarmReceiver.ALARM_ID, -1)
         
+        // Check if launched from multi-mission alarm
+        val fromMultiMissionAlarm = intent.getBooleanExtra("from_multi_mission_alarm", false)
+        val fromWakeMultiMission = intent.getBooleanExtra("from_wake_multi_mission", false)
+        val multiMissionAlarmId = intent.getIntExtra(AlarmReceiver.ALARM_ID, -1)
+        val multiMissionData = intent.getStringExtra("multi_mission_data") ?: ""
+        
         if (fromMissedSequencerAlarm && missedSequencerAlarmId != -1) {
             addSequencerLog("MainActivity launched from missed sequencer alarm: alarmId=$missedSequencerAlarmId")
             addSequencerLog("Sequencer missed alarm is now handled by AlarmForegroundService")
+        }
+        
+        // Handle multi-mission data from AlarmReceiver
+        if ((fromMultiMissionAlarm || fromWakeMultiMission) && multiMissionAlarmId != -1 && multiMissionData.isNotEmpty()) {
+            addSequencerLog("MainActivity launched from multi-mission alarm: alarmId=$multiMissionAlarmId data=$multiMissionData")
+            
+            // Parse and enqueue the multi-mission data
+            val missionIds = multiMissionData.split("+").map { it.trim().lowercase() }
+                .map { mission ->
+                    when (mission) {
+                        "tap" -> "tap"
+                        "pwd", "password", "pswd" -> "password"
+                        else -> "" // CRITICAL FIX: Block invalid mission names
+                    }
+                }
+                .filter { it.isNotEmpty() }
+            
+            addSequencerLog("Multi-mission parsed: $missionIds")
+            
+            // Create mission specs and enqueue
+            val specs = missionIds.map { missionId ->
+                val timeoutMs = if (missionId == "tap") 105000L else 30000L
+                com.vaishnava.alarm.sequencer.MissionSpec(
+                    id = missionId,
+                    params = mapOf("mission_type" to missionId),
+                    timeoutMs = timeoutMs,
+                    retryCount = 3,
+                    sticky = true,
+                    retryDelayMs = 1000L
+                )
+            }
+            
+            missionSequencer.enqueueAll(specs)
+            addSequencerLog("Multi-mission: Enqueued ${specs.size} missions")
+            
+            // Auto-start the sequencer after a short delay
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                try {
+                    val alarmStorage = com.vaishnava.alarm.AlarmStorage(this)
+                    val alarm = alarmStorage.getAlarm(multiMissionAlarmId)
+                    if (alarm != null) {
+                        missionSequencer.startWhenAlarmFires(alarm.ringtoneUri)
+                        addSequencerLog("Multi-mission: Started sequencer for alarmId=$multiMissionAlarmId")
+                    }
+                } catch (e: Exception) {
+                    addSequencerLog("Multi-mission: Failed to start sequencer: ${e.message}")
+                    // NO FALLBACK: Multi-mission requires sequencer - do not proceed
+                    return@postDelayed
+                }
+            }, 1000)
         }
         
         if (sequencerAlarmId != -1 && sequencerRingtoneUri != null) {
             addSequencerLog("MainActivity launched from sequencer alarm notification: alarmId=$sequencerAlarmId")
             
             if (autoStartSequencer) {
-                addSequencerLog("Auto-start sequencer requested, starting immediately")
+                addSequencerLog("Auto-start sequencer requested, enqueuing missions and starting")
                 // Auto-start the sequencer after a short delay to ensure initialization
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     try {
                         val ringtoneUri = android.net.Uri.parse(sequencerRingtoneUri)
-                        missionSequencer.startWhenAlarmFires(ringtoneUri)
-                        addSequencerLog("Auto-start sequencer completed successfully")
+                        
+                        // CRITICAL FIX: Enqueue missions from alarm configuration before starting
+                        val alarmStorage = com.vaishnava.alarm.AlarmStorage(this)
+                        val alarm = alarmStorage.getAlarm(sequencerAlarmId)
+                        if (alarm != null && alarm.missionType == "sequencer") {
+                            // Parse mission names from missionPassword field (e.g., "Tap+Pwd")
+                            val missionNames = alarm.missionPassword ?: ""
+                            val missionIds = missionNames.split("+").map { it.trim().lowercase() }
+                            .map { mission ->
+                                when (mission) {
+                                    "tap" -> "tap"
+                                    "pwd", "password", "pswd" -> "password"
+                                    else -> "" // CRITICAL FIX: Block invalid mission names
+                                }
+                            }
+                            .filter { it.isNotEmpty() }
+                            val specs = missionIds.map { missionId ->
+                                val timeoutMs = if (missionId == "tap") 105000L else 30000L
+                                com.vaishnava.alarm.sequencer.MissionSpec(
+                                    id = missionId,
+                                    params = mapOf("mission_type" to missionId),
+                                    timeoutMs = timeoutMs,
+                                    retryCount = 3,
+                                    sticky = true,
+                                    retryDelayMs = 1000L
+                                )
+                            }
+                            
+                            // Enqueue missions first, then start
+                            missionSequencer.enqueueAll(specs)
+                            missionSequencer.startWhenAlarmFires(ringtoneUri)
+                            addSequencerLog("Auto-start sequencer completed successfully with ${specs.size} missions")
+                        } else {
+                            addSequencerLog("Auto-start sequencer failed: alarm not found or not sequencer type")
+                        }
                     } catch (e: Exception) {
                         addSequencerLog("Auto-start sequencer failed: ${e.message}")
                     }
@@ -1868,8 +1957,8 @@ fun AlarmScreenContent(
             onEnqueue = { missionIds ->
                 val mainActivity = context as MainActivity
                 val specs = missionIds.split(",").map { it.trim() }.filter { it.isNotEmpty() && it != "none" }.map { missionId ->
-                    // CRITICAL PINPOINT FIX: Never allow "none" in mission params
-                    val safeMissionId = missionId // Allow "none" mission ID
+                    // CRITICAL FIX: Block "none" missions from being created
+                    val safeMissionId = missionId
                     val timeoutMs = if (safeMissionId == "tap") 120000L else 30000L // 2 minutes for tap, 30s for others
                     Log.d("MainActivity", "MISSION_TIMEOUT_ENQUEUE: missionId=$safeMissionId timeoutMs=$timeoutMs")
                     MissionSpec(
@@ -3130,10 +3219,10 @@ fun AddAlarmDialog(
                         // CRITICAL FIX: Respect user's intended order for multi-mission sequences
                         val orderedMissions = queuedMissions.take(2) // Always respect user order
                         
-                        val specs = orderedMissions.map { missionId ->
+                        val specs = orderedMissions.filter { it.isNotEmpty() && it != "none" }.map { missionId ->
                             Log.d("MainActivity", "CREATING_MISSION_SPEC: missionId=$missionId")
-                            // CRITICAL PINPOINT FIX: Never allow "none" in mission params
-                            val safeMissionId = missionId // Allow "none" mission ID
+                            // CRITICAL FIX: Block "none" missions from being created
+                            val safeMissionId = missionId
                             val timeoutMs = if (safeMissionId == "tap") 105000L else 30000L // 105 seconds for tap to match AlarmActivity, 30s for others
                             Log.d("MainActivity", "MISSION_TIMEOUT: missionId=$safeMissionId timeoutMs=$timeoutMs")
                             MissionSpec(

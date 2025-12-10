@@ -166,7 +166,7 @@ class AlarmReceiver : BroadcastReceiver() {
                                     when (mission) {
                                         "tap" -> "tap"
                                         "pwd", "password", "pswd" -> "password"
-                                        else -> mission
+                                        else -> "" // CRITICAL FIX: Block invalid mission names
                                     }
                                 }
                                 .filter { it.isNotEmpty() && it != "none" }
@@ -378,18 +378,23 @@ class AlarmReceiver : BroadcastReceiver() {
             if (skipAudio) {
                 Log.d(TAG, "Skipping AlarmForegroundService start for alarm ${alarm.id} (audio already handled)")
             } else {
-                // FIXED: Start AlarmForegroundService for ALL alarms including sequencer alarms
-                // MissionSequencer handles mission sequencing, but AlarmForegroundService handles audio
-                Log.d(TAG, "Starting AlarmForegroundService for alarm ${alarm.id} (missionType: ${alarm.missionType})")
-                val svc = Intent(context, AlarmForegroundService::class.java).apply {
-                    putExtra(ALARM_ID, alarm.id)
-                    putExtra(EXTRA_RINGTONE_URI, alarm.ringtoneUri)
-                    putExtra(EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
-                    if (isWakeUpFollowUp) {
-                        putExtra("is_wake_up_follow_up", true)
+                // CRITICAL FIX: DO NOT start AlarmForegroundService for sequencer alarms
+                // MissionSequencer handles everything for sequencer alarms (audio + missions)
+                // AlarmForegroundService only handles single-mission alarms
+                if (alarm.missionType != "sequencer") {
+                    Log.d(TAG, "Starting AlarmForegroundService for single-mission alarm ${alarm.id} (missionType: ${alarm.missionType})")
+                    val svc = Intent(context, AlarmForegroundService::class.java).apply {
+                        putExtra(ALARM_ID, alarm.id)
+                        putExtra(EXTRA_RINGTONE_URI, alarm.ringtoneUri)
+                        putExtra(EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
+                        if (isWakeUpFollowUp) {
+                            putExtra("is_wake_up_follow_up", true)
+                        }
                     }
+                    context.startForegroundService(svc)
+                } else {
+                    Log.d(TAG, "SKIPPED AlarmForegroundService for sequencer alarm ${alarm.id} - MissionSequencer handles everything")
                 }
-                context.startForegroundService(svc)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start AlarmForegroundService: ${e.message}", e)
@@ -427,7 +432,14 @@ class AlarmReceiver : BroadcastReceiver() {
                         // Silent fail - continue with normal flow
                     }
                 }
-                context.startActivity(act)
+                
+                // CRITICAL FIX: Only start AlarmActivity if not a sequencer alarm
+                // Sequencer alarms are handled by the MissionSequencer, not direct AlarmActivity launch
+                if (alarm.missionType != "sequencer") {
+                    context.startActivity(act)
+                } else {
+                    android.util.Log.d("RECEIVER_DEBUG", "Skipping AlarmActivity start for sequencer alarm - handled by MissionSequencer")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start AlarmActivity for protected alarm: ${e.message}", e)
             }
@@ -486,7 +498,14 @@ class AlarmReceiver : BroadcastReceiver() {
                     putExtra("mission_type", missionType)
                     putExtra("mission_password", alarm.missionPassword ?: "")
                 }
-                context.startActivity(act)
+                
+                // CRITICAL FIX: Only start AlarmActivity if not a sequencer alarm
+                // Sequencer alarms are handled by the MissionSequencer, not direct AlarmActivity launch
+                if (alarm.missionType != "sequencer") {
+                    context.startActivity(act)
+                } else {
+                    android.util.Log.d("RECEIVER_DEBUG_WAKE", "Skipping AlarmActivity start for sequencer alarm - handled by MissionSequencer")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start AlarmActivity for wake-up-check follow-up: ${e.message}", e)
             }

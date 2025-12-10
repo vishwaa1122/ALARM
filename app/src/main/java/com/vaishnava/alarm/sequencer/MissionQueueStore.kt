@@ -95,8 +95,15 @@ class MissionQueueStore(private val context: Context) {
                     paramsMap[key] = paramsJson.getString(key)
                 }
                 
+                val missionId = json.getString("id")
+                // CRITICAL FIX: Block "none" missions from being loaded from storage
+                if (missionId == "none" || missionId.contains("none_mission") || missionId.contains("mission_type=none")) {
+                    MissionLogger.logWarning("QUEUE_LOAD_BLOCKED: Skipping 'none' mission from storage - missionId=$missionId")
+                    continue
+                }
+                
                 queue.add(MissionSpec(
-                    id = json.getString("id"),
+                    id = missionId,
                     params = paramsMap,
                     timeoutMs = json.getLong("timeoutMs"),
                     retryCount = json.getInt("retryCount"),
@@ -146,8 +153,15 @@ class MissionQueueStore(private val context: Context) {
                 paramsMap[key] = paramsJson.getString(key)
             }
             
+            val missionId = json.getString("id")
+            // CRITICAL FIX: Block "none" missions from being loaded from current mission storage
+            if (missionId == "none" || missionId.contains("none_mission") || missionId.contains("mission_type=none")) {
+                MissionLogger.logWarning("CURRENT_LOAD_BLOCKED: Skipping 'none' mission from storage - missionId=$missionId")
+                return null
+            }
+            
             val mission = MissionSpec(
-                id = json.getString("id"),
+                id = missionId,
                 params = paramsMap,
                 timeoutMs = json.getLong("timeoutMs"),
                 retryCount = json.getInt("retryCount"),

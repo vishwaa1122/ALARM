@@ -1,7 +1,10 @@
 package com.vaishnava.alarm
 
 import android.app.*
-import android.content.*
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.media.*
@@ -15,7 +18,9 @@ import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.vaishnava.alarm.data.resolveRingtoneTitle
+import com.vaishnava.alarm.AlarmStorage
 import com.vaishnava.alarm.data.Alarm
+import com.vaishnava.alarm.sequencer.MissionSequencer
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileWriter
@@ -234,15 +239,57 @@ class AlarmForegroundService : Service() {
             var localMissionPassword: String? = currentMissionPassword
             var localIsProtected: Boolean = currentIsProtected
             
-            // If no mission data available, try to get from alarm storage
-            if (localMissionType == null) {
-                try {
-                    val alarm = alarmStorage.getAlarm(currentAlarmId)
-                    localMissionType = alarm?.missionType
-                    localMissionPassword = alarm?.missionPassword
-                    localIsProtected = alarm?.isProtected ?: false
-                } catch (_: Exception) { }
-            }
+            // CRITICAL FIX: Always get fresh mission data from alarm configuration
+            try {
+                val alarm = alarmStorage.getAlarm(currentAlarmId)
+                if (alarm != null) {
+                    when (alarm.missionType) {
+                        "sequencer" -> {
+                            // CRITICAL DEBUG: Log exactly what's in missionPassword
+                            val missionNamesRaw = alarm.missionPassword ?: ""
+                            android.util.Log.d("MISSION_DEBUG_LAUNCH", "Raw missionPassword: '$missionNamesRaw'")
+                            
+                            // For sequencer alarms, parse the mission sequence
+                            val missionNames = alarm.missionPassword ?: ""
+                            val missionIds = missionNames.split("+").map { it.trim().lowercase() }
+                                .map { mission ->
+                                    when (mission) {
+                                        "tap" -> "tap"
+                                        "pwd", "password", "pswd" -> "password"
+                                        else -> "" // CRITICAL FIX: Block invalid mission names
+                                    }
+                                }
+                                .filter { it.isNotEmpty() }
+                            
+                            android.util.Log.d("MISSION_DEBUG_LAUNCH", "Parsed missionIds: $missionIds")
+                            
+                            // CRITICAL FIX: Block "none" missions - let sequencer handle empty cases
+                            localMissionType = missionIds.firstOrNull() ?: ""
+                            localMissionPassword = if (localMissionType == "password") MissionSequencer.DEFAULT_GLOBAL_PASSWORD else ""
+                            
+                            android.util.Log.d("MISSION_DEBUG_LAUNCH", "Final localMissionType: '$localMissionType'")
+                        }
+                        "tap" -> {
+                            localMissionType = "tap"
+                            localMissionPassword = ""
+                        }
+                        "password" -> {
+                            localMissionType = "password"
+                            localMissionPassword = alarm.missionPassword?.takeIf { it.isNotBlank() } ?: MissionSequencer.DEFAULT_GLOBAL_PASSWORD
+                        }
+                        "none" -> {
+                            // CRITICAL FIX: Block "none" missions from being launched
+                            localMissionType = ""
+                            localMissionPassword = ""
+                        }
+                        else -> {
+                            localMissionType = alarm.missionType
+                            localMissionPassword = alarm.missionPassword
+                        }
+                    }
+                    localIsProtected = alarm.isProtected
+                }
+            } catch (_: Exception) { }
             
             // CRITICAL FIX: Get complete alarm data to pass to AlarmActivity
             var hour = -1
@@ -262,7 +309,9 @@ class AlarmForegroundService : Service() {
                 }
             } catch (_: Exception) { }
             
-            val intent = Intent(this@AlarmForegroundService, AlarmActivity::class.java).apply {
+            // CRITICAL FIX: Use full-screen intent for lock screen display
+            val fullScreenIntent = Intent(this@AlarmForegroundService, AlarmActivity::class.java).apply {
+                // Use standard flags - AlarmActivity handles lock screen display
                 addFlags(
                     Intent.FLAG_ACTIVITY_NEW_TASK or
                             Intent.FLAG_ACTIVITY_CLEAR_TOP or
@@ -270,7 +319,8 @@ class AlarmForegroundService : Service() {
                             Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT or
                             Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
                             Intent.FLAG_ACTIVITY_NO_HISTORY or
-                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                            Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS or
+                            Intent.FLAG_ACTIVITY_NO_ANIMATION
                 )
                 putExtra(AlarmReceiver.ALARM_ID, currentAlarmId)
                 putExtra("extra_ringtone_uri", ringtoneUri?.toString())
@@ -282,36 +332,9 @@ class AlarmForegroundService : Service() {
                 putExtra("mission_type", localMissionType)
                 putExtra("mission_password", localMissionPassword)
                 putExtra("is_protected", localIsProtected)
-                putExtra("wake_check_enabled", wakeCheckEnabled)
-                putExtra("wake_check_minutes", wakeCheckMinutes)
-                if (isWakeCheckLaunch) putExtra("from_wake_check", true)
-                
-                // Pass mission data for Direct Boot restoration
-                localMissionType?.let { putExtra("mission_type", it) }
-                localMissionPassword?.let { putExtra("mission_password", it) }
-                putExtra("is_protected", localIsProtected)
-                
-                // For sequencer alarms, pass the current mission info (but NOT during force restart)
-                try {
-                    val alarm = alarmStorage.getAlarm(currentAlarmId)
-                    if (alarm?.missionType == "sequencer") {
-                        val mainActivity = MainActivity.getInstance()
-                        val sequencer = mainActivity?.missionSequencer
-                        val currentMission = sequencer?.getCurrentMission()
-                        
-                        // Only pass mission info if we have a current mission (not force restart)
-                        if (currentMission != null) {
-                            val actualMissionType = currentMission.params["mission_type"] ?: currentMission.id
-                            putExtra(com.vaishnava.alarm.sequencer.MissionSequencer.EXTRA_FROM_SEQUENCER, true)
-                            putExtra("sequencer_context", "notification_press")
-                            putExtra("mission_id", currentMission.id)
-                            putExtra("mission_type", actualMissionType)
-                        }
-                        // During force restart, don't pass any mission info - let AlarmActivity handle it
-                    }
-                } catch (_: Exception) {}
             }
-            startActivity(intent)
+            
+            startActivity(fullScreenIntent)
         } catch (_: Exception) {
             try {
                 val fallbackIntent = Intent(this@AlarmForegroundService, AlarmActivity::class.java).apply {
@@ -517,6 +540,9 @@ class AlarmForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val TAG = "AlarmForegroundService"
+        
+        // CRITICAL DEBUG: Log every time AlarmForegroundService is started
+        android.util.Log.d("SERVICE_DEBUG_MAIN", "AlarmForegroundService.onStartCommand() called with intent=${intent?.action}")
 
         val action = intent?.action
         val alarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
@@ -660,10 +686,52 @@ class AlarmForegroundService : Service() {
             storedIsProtected = alarm?.isProtected ?: false
         } catch (_: Exception) { }
         
-        // Use intent data if available, otherwise use stored data
-        currentMissionType = missionType ?: storedMissionType
-        currentMissionPassword = missionPassword ?: storedMissionPassword
-        currentIsProtected = isProtected ?: storedIsProtected
+        // CRITICAL FIX: Parse mission data from alarm configuration for both single and multi-mission
+        val alarm = alarmStorage.getAlarm(currentAlarmId)
+        if (alarm != null) {
+            when (alarm.missionType) {
+                "sequencer" -> {
+                    // For sequencer alarms, parse the mission sequence
+                    val missionNames = alarm.missionPassword ?: ""
+                    val missionIds = missionNames.split("+").map { it.trim().lowercase() }
+                        .map { mission ->
+                            when (mission) {
+                                "tap" -> "tap"
+                                "pwd", "password", "pswd" -> "password"
+                                else -> "" // CRITICAL FIX: Block invalid mission names
+                            }
+                        }
+                        .filter { it.isNotEmpty() }
+                    
+                    // CRITICAL FIX: Block "none" missions - let sequencer handle empty cases
+                    currentMissionType = missionIds.firstOrNull() ?: ""
+                    currentMissionPassword = if (currentMissionType == "password") MissionSequencer.DEFAULT_GLOBAL_PASSWORD else ""
+                }
+                "tap" -> {
+                    currentMissionType = "tap"
+                    currentMissionPassword = ""
+                }
+                "password" -> {
+                    currentMissionType = "password"
+                    currentMissionPassword = alarm.missionPassword?.takeIf { it.isNotBlank() } ?: MissionSequencer.DEFAULT_GLOBAL_PASSWORD
+                }
+                "none" -> {
+                    // CRITICAL FIX: Block "none" missions from being launched
+                    currentMissionType = ""
+                    currentMissionPassword = ""
+                }
+                else -> {
+                    currentMissionType = alarm.missionType
+                    currentMissionPassword = alarm.missionPassword
+                }
+            }
+            currentIsProtected = alarm.isProtected
+        } else {
+            // Fallback to intent data if alarm not found
+            currentMissionType = missionType ?: storedMissionType
+            currentMissionPassword = missionPassword ?: storedMissionPassword
+            currentIsProtected = isProtected ?: storedIsProtected
+        }
         
         currentRepeatDays = intent?.getIntArrayExtra(AlarmReceiver.EXTRA_REPEAT_DAYS) ?: intArrayOf()
 
@@ -730,10 +798,10 @@ class AlarmForegroundService : Service() {
                             when (mission) {
                                 "tap" -> "tap"
                                 "pwd", "password", "pswd" -> "password"
-                                else -> mission
+                                else -> "" // CRITICAL FIX: Block invalid mission names
                             }
                         }
-                        .filter { it.isNotEmpty() && it != "none" }
+                        .filter { it.isNotEmpty() }
                     
                     android.util.Log.d(TAG, "Parsed mission IDs for sequencer missed alarm: $missionIds")
                     
@@ -1880,20 +1948,61 @@ private fun shutdownTTSForensic() {
     }
 
     private fun createFullScreenIntent(): PendingIntent {
-        // Get current mission data to pass to AlarmActivity
-        var localMissionType: String? = currentMissionType
-        var localMissionPassword: String? = currentMissionPassword
-        var localIsProtected: Boolean = currentIsProtected
+        // CRITICAL FIX: Always get fresh mission data from alarm configuration
+        var localMissionType: String? = null
+        var localMissionPassword: String? = null
+        var localIsProtected: Boolean = false
         
-        // If no mission data available, try to get from alarm storage
-        if (localMissionType == null) {
-            try {
-                val alarm = alarmStorage.getAlarm(currentAlarmId)
-                localMissionType = alarm?.missionType
-                localMissionPassword = alarm?.missionPassword
-                localIsProtected = alarm?.isProtected ?: false
-            } catch (_: Exception) { }
-        }
+        try {
+            val alarm = alarmStorage.getAlarm(currentAlarmId)
+            if (alarm != null) {
+                when (alarm.missionType) {
+                    "sequencer" -> {
+                        // CRITICAL DEBUG: Log exactly what's in missionPassword
+                        val missionNamesRaw = alarm.missionPassword ?: ""
+                        android.util.Log.d("MISSION_DEBUG", "Raw missionPassword: '$missionNamesRaw'")
+                        
+                        // For sequencer alarms, parse the mission sequence
+                        val missionNames = alarm.missionPassword ?: ""
+                        val missionIds = missionNames.split("+").map { it.trim().lowercase() }
+                            .map { mission ->
+                                when (mission) {
+                                    "tap" -> "tap"
+                                    "pwd", "password", "pswd" -> "password"
+                                    else -> "" // CRITICAL FIX: Block invalid mission names
+                                }
+                            }
+                            .filter { it.isNotEmpty() }
+                        
+                        android.util.Log.d("MISSION_DEBUG", "Parsed missionIds: $missionIds")
+                        
+                        // CRITICAL FIX: Block "none" missions - let sequencer handle empty cases
+                        localMissionType = missionIds.firstOrNull() ?: ""
+                        localMissionPassword = if (localMissionType == "password") MissionSequencer.DEFAULT_GLOBAL_PASSWORD else ""
+                        
+                        android.util.Log.d("MISSION_DEBUG", "Final localMissionType: '$localMissionType'")
+                    }
+                    "tap" -> {
+                        localMissionType = "tap"
+                        localMissionPassword = ""
+                    }
+                    "password" -> {
+                        localMissionType = "password"
+                        localMissionPassword = alarm.missionPassword?.takeIf { it.isNotBlank() } ?: MissionSequencer.DEFAULT_GLOBAL_PASSWORD
+                    }
+                    "none" -> {
+                        // CRITICAL FIX: Block "none" missions from being launched
+                        localMissionType = ""
+                        localMissionPassword = ""
+                    }
+                    else -> {
+                        localMissionType = alarm.missionType
+                        localMissionPassword = alarm.missionPassword
+                    }
+                }
+                localIsProtected = alarm.isProtected
+            }
+        } catch (_: Exception) { }
         
         val intent = Intent(this, AlarmActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)

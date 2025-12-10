@@ -195,13 +195,21 @@ class BootReceiver : BroadcastReceiver() {
                         null
                     }
                     
+                    // CRITICAL FIX: Create unique PendingIntent based on mission content
+                    val missionSignature = "${ringId}_${alarm?.missionType}_${alarm?.missionPassword}"
+                    val uniqueRequestCode = missionSignature.hashCode()
+                    
                     val showIntent = if (alarm?.missionType != "sequencer") {
                         android.app.PendingIntent.getActivity(
                             deviceProtectedContext,
-                            ringId xor 0x0100,
+                            uniqueRequestCode,
                             Intent(deviceProtectedContext, AlarmActivity::class.java).apply {
                                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                                 putExtra(AlarmReceiver.ALARM_ID, ringId)
+                                // CRITICAL FIX: Block "none" missions from being launched via Boot
+                                putExtra("mission_type", alarm?.missionType?.let { if (it == "none") "" else it } ?: "")
+                                putExtra("mission_password", alarm?.missionPassword ?: "")
+                                putExtra("mission_signature", missionSignature)
                             },
                             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
                         )
@@ -209,10 +217,14 @@ class BootReceiver : BroadcastReceiver() {
                         // For sequencer alarms, create a broadcast PendingIntent instead
                         android.app.PendingIntent.getBroadcast(
                             deviceProtectedContext,
-                            ringId xor 0x0100,
+                            uniqueRequestCode,
                             Intent(deviceProtectedContext, AlarmReceiver::class.java).apply {
                                 action = "com.vaishnava.alarm.SEQUENCER_BOOT_ALARM"
                                 putExtra(AlarmReceiver.ALARM_ID, ringId)
+                                // CRITICAL FIX: Block "none" missions from being launched via Boot
+                                putExtra("mission_type", alarm?.missionType?.let { if (it == "none") "" else it } ?: "")
+                                putExtra("mission_password", alarm?.missionPassword ?: "")
+                                putExtra("mission_signature", missionSignature)
                             },
                             android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
                         )
