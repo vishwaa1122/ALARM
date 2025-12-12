@@ -1,0 +1,31 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="360dp"
+    android:height="360dp"
+    android:viewportWidth="360"
+    android:viewportHeight="360">
+
+    <path
+        android:name="lightningPath"
+        android:pathData="M40,80 L90,100 L60,140 L140,120 L120,180 L200,110"
+        android:strokeWidth="3"
+        android:strokeColor="@color/neon_glow"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:alpha="0.9"/>
+
+    <path
+        android:pathData="M40,80 L90,100 L60,140 L140,120 L120,180 L200,110"
+        android:strokeWidth="6"
+        android:strokeColor="@color/dark_blue_secondary"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:alpha="0.35"/>
+
+    <path
+        android:pathData="M40,80 L90,100 L60,140 L140,120 L120,180 L200,110"
+        android:strokeWidth="10"
+        android:strokeColor="@color/neon_glow"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:alpha="0.15"/>
+</vector>

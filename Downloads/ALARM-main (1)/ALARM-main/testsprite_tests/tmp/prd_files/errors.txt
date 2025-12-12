@@ -1,0 +1,197 @@
+failed
+Download info
+:app:compileDebugKotlin
+AlarmActivity.kt
+Unexpected tokens (use ';' to separate expressions on the same line)
+Expecting member declaration
+Expecting member declaration
+Expecting member declaration
+Expecting member declaration
+Expecting member declaration
+Expecting a top level declaration
+Expecting a top level declaration
+Expecting an expression
+Expecting a top level declaration
+Unresolved reference: KeyboardOptions
+None of the following functions can be called with the arguments supplied:
+public final fun postDelayed(p0: Runnable, p1: Any?, p2: Long): Boolean defined in android.os.Handler
+public final fun postDelayed(p0: Runnable, p1: Long): Boolean defined in android.os.Handler
+Function declaration must have a name
+Suspend function 'delay' should be called only from a coroutine or another suspend function
+Unresolved reference: onDismiss
+Unresolved reference: Difficulty
+Unresolved reference: MathProblem
+'when' expression must be exhaustive, add necessary 'else' branch
+Unresolved reference: Difficulty
+Unresolved reference: MathProblem
+Unresolved reference: Difficulty
+Unresolved reference: MathProblem
+Unresolved reference: MathProblem
+Unresolved reference: MathProblem
+Unresolved reference: Difficulty
+Unresolved reference: MathProblem
+Unresolved reference: MathProblem
+Unresolved reference: MathProblem
+Unresolved reference: MathProblem
+Unresolved reference: sendBroadcast
+Unresolved reference: Difficulty
+Unresolved reference: @AlarmActivity
+Unresolved reference: startActivity
+Modifier 'override' is not applicable to 'top level function'
+No supertypes are accessible in this context
+Unresolved reference: setShowWhenLocked
+Unresolved reference: setTurnScreenOn
+Unresolved reference: window
+Unresolved reference: window
+Unresolved reference: registerReceiver
+Unresolved reference: registerReceiver
+Unresolved reference: intent
+Unresolved reference: applicationContext
+Unresolved reference: DEFAULT_GLOBAL_PASSWORD
+'this' is not defined in this context
+Unresolved reference: setContent
+@Composable invocations can only happen from the context of a @Composable function
+Unresolved reference: resources
+Unresolved reference: packageName
+Unresolved reference: resources
+Unresolved reference: packageName
+Unresolved reference: packageName
+Unresolved reference: getSystemService
+Unresolved reference: setShowWhenLocked
+Unresolved reference: setTurnScreenOn
+Unresolved reference: window
+Modifier 'override' is not applicable to 'top level function'
+No supertypes are accessible in this context
+Not enough information to infer type variable T
+Unresolved reference: STARTUP_BLOCKED_TIME_SECONDS
+Unresolved reference: stopService
+Unresolved reference: @AlarmActivity
+Unresolved reference: AlarmService
+Unresolved reference: TAG
+Unresolved reference: getSystemService
+Unresolved reference: @AlarmActivity
+Unresolved reference: @AlarmActivity
+Unresolved reference: KeyboardOptions
+Unresolved reference: DEFAULT_GLOBAL_PASSWORD
+Unresolved reference: isDismissed
+Unresolved reference: state
+Unresolved reference: state
+Unresolved reference: size
+Unresolved reference: size
+Cannot find a parameter with this name: focusedBorderColor
+Cannot find a parameter with this name: unfocusedBorderColor
+Cannot find a parameter with this name: focusedLabelColor
+Cannot find a parameter with this name: unfocusedLabelColor
+Cannot find a parameter with this name: cursorColor
+Cannot find a parameter with this name: textColor
+Unresolved reference: DEFAULT_GLOBAL_PASSWORD
+Unresolved reference: DEFAULT_GLOBAL_PASSWORD
+Unresolved reference: isDismissed
+Unresolved reference: state
+Unresolved reference: missionStarted
+Unresolved reference: missionStarted
+Unresolved reference: missionStarted
+Unresolved reference: DEFAULT_GLOBAL_PASSWORD
+Unresolved reference: isDismissed
+Unresolved reference: missionStarted
+Unresolved reference: missionStarted
+Function invocation 'focusRequester(...)' expected
+Unresolved reference. None of the following candidates is applicable because of receiver type mismatch:
+public fun Modifier.focusRequester(focusRequester: FocusRequester): Modifier defined in androidx.compose.ui.focus
+Unresolved reference: keyboardController
+Unresolved reference: keyboardController
+Unresolved reference: isDismissed
+Unresolved reference: @AlarmActivity
+Unresolved reference: applicationContext
+Unresolved reference: @AlarmActivity
+Unresolved reference: @AlarmActivity
+Unresolved reference: missionStarted
+Unresolved reference: missionStarted
+Unresolved reference: missionStarted
+Unresolved reference: missionStarted
+Unresolved reference: DEFAULT_GLOBAL_PASSWORD
+Unresolved reference: isDismissed
+Unresolved reference: KeyboardOptions
+Unresolved reference: DEFAULT_GLOBAL_PASSWORD
+Unresolved reference: isDismissed
+Function invocation 'focusRequester(...)' expected
+Unresolved reference. None of the following candidates is applicable because of receiver type mismatch:
+public fun Modifier.focusRequester(focusRequester: FocusRequester): Modifier defined in androidx.compose.ui.focus
+Unresolved reference: Checkbox
+Unresolved reference: it
+Unresolved reference: CheckboxDefaults
+Unresolved reference: missionStarted
+Unresolved reference: currentMathProblem
+Unresolved reference: currentMathProblem
+Function invocation 'focusRequester(...)' expected
+Unresolved reference. None of the following candidates is applicable because of receiver type mismatch:
+public fun Modifier.focusRequester(focusRequester: FocusRequester): Modifier defined in androidx.compose.ui.focus
+Unresolved reference: isPasswordInputEnabled
+Function invocation 'focusRequester(...)' expected
+Unresolved reference. None of the following candidates is applicable because of receiver type mismatch:
+public fun Modifier.focusRequester(focusRequester: FocusRequester): Modifier defined in androidx.compose.ui.focus
+Unresolved reference: keyboardController
+Unresolved reference: isPasswordInputEnabled
+Unresolved reference: DEFAULT_GLOBAL_PASSWORD
+Function invocation 'focusRequester(...)' expected
+Unresolved reference. None of the following candidates is applicable because of receiver type mismatch:
+public fun Modifier.focusRequester(focusRequester: FocusRequester): Modifier defined in androidx.compose.ui.focus
+Unresolved reference: isPasswordInputEnabled
+Unresolved reference: missionStarted
+Unresolved reference: missionStarted
+Unresolved reference: currentMathProblem
+Unresolved reference: isDismissed
+Unresolved reference: isDismissed
+Function invocation 'focusRequester(...)' expected
+Unresolved reference. None of the following candidates is applicable because of receiver type mismatch:
+public fun Modifier.focusRequester(focusRequester: FocusRequester): Modifier defined in androidx.compose.ui.focus
+Unresolved reference: Difficulty
+Unresolved reference: Difficulty
+Unresolved reference: Difficulty
+Overload resolution ambiguity:
+public inline fun <T> Iterable<TypeVariable(T)>.forEach(action: (TypeVariable(T)) -> Unit): Unit defined in kotlin.collections
+public inline fun <K, V> Map<out TypeVariable(K), TypeVariable(V)>.forEach(action: (Map.Entry<TypeVariable(K), TypeVariable(V)>) -> Unit): Unit defined in kotlin.collections
+Cannot infer a type for this parameter. Please specify it explicitly.
+@Composable invocations can only happen from the context of a @Composable function
+Unresolved reference: currentMathProblem
+Unresolved reference: missionStarted
+@Composable invocations can only happen from the context of a @Composable function
+'when' expression must be exhaustive, add necessary 'else' branch
+Unresolved reference: Difficulty
+Unresolved reference: Difficulty
+Unresolved reference: Difficulty
+Unresolved reference: it
+Unresolved reference: isDismissed
+Unresolved reference: finish
+Unresolved reference: TAG
+Unresolved reference: @AlarmActivity
+Unresolved reference: startForegroundService
+Unresolved reference: startService
+Unresolved reference: applicationContext
+Unresolved reference: getSystemService
+'this' is not defined in this context
+'this' is not defined in this context
+'this' is not defined in this context
+'this' is not defined in this context
+Unresolved reference: TAG
+Unresolved reference: getSystemService
+Unresolved reference: applicationContext
+Unresolved reference: createDeviceProtectedStorageContext
+'this' is not defined in this context
+Unresolved reference: TAG
+'this' is not defined in this context
+Unresolved reference: startActivity
+Unresolved reference: finish
+Modifier 'override' is not applicable to 'top level function'
+Modifier 'override' is not applicable to 'top level function'
+No supertypes are accessible in this context
+Modifier 'override' is not applicable to 'top level function'
+No supertypes are accessible in this context
+Modifier 'override' is not applicable to 'top level function'
+No supertypes are accessible in this context
+Unresolved reference: unregisterReceiver
+Unresolved reference: TAG
+Unresolved reference: TAG
+'this' is not defined in this context
+Unresolved reference: packageName
+Unresolved reference: startActivityForResult

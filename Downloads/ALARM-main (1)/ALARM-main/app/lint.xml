@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!-- Suppress Android 14+ registerReceiver flag lint where we handle flags conditionally at runtime -->
+    <issue id="UnspecifiedRegisterReceiverFlag" severity="ignore" />
+</lint>
