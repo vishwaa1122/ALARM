@@ -4,6 +4,9 @@ package com.vaishnava.alarm
 
 import android.app.Activity
 import android.app.KeyguardManager
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -28,9 +31,10 @@ import android.view.WindowManager
 import android.widget.Toast
 import android.widget.VideoView
 import android.content.IntentFilter
+import androidx.core.app.NotificationCompat
+import com.vaishnava.alarm.sequencer.MissionSpec
 import android.annotation.SuppressLint
 import android.app.AlarmManager
-import android.app.NotificationManager
 import android.app.PendingIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -116,12 +120,128 @@ import kotlin.random.Random
 
 class AlarmActivity : ComponentActivity() {
 
+    // ===================== ALARM RINGING NOTIFICATION =====================
+    private val notificationRepostReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (context == null || intent == null) return
+            
+            try {
+                val action = intent.action
+                val alarmId = intent.getIntExtra("ALARM_ID", -1)
+                
+                if (action == "com.vaishnava.alarm.REPOST_ACTIVITY_NOTIFICATION" && alarmId == this@AlarmActivity.alarmId) {
+                    Log.d(TAG, "Received repost request for alarm ID: $alarmId, reposting notification...")
+                    showAlarmRingingNotification()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error handling notification repost: ${e.message}")
+            }
+        }
+    }
+    
+    private fun showAlarmRingingNotification() {
+        try {
+            createAlarmNotificationChannel()
+            val notification = buildAlarmNotification()
+            
+            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.notify(ALARM_RINGING_NOTIFICATION_ID, notification)
+            
+            Log.d(TAG, "ALARM_RINGING_NOTIFICATION: Showing alarm ringing notification")
+        } catch (e: Exception) {
+            Log.e(TAG, "ALARM_RINGING_NOTIFICATION_ERROR: ${e.message}")
+        }
+    }
+    
+    private fun hideAlarmRingingNotification() {
+        try {
+            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.cancel(ALARM_RINGING_NOTIFICATION_ID)
+            Log.d(TAG, "ALARM_RINGING_NOTIFICATION: Hidden alarm ringing notification")
+        } catch (e: Exception) {
+            Log.e(TAG, "ALARM_RINGING_NOTIFICATION_HIDE_ERROR: ${e.message}")
+        }
+    }
+    
+    private fun createAlarmNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channelId = "alarm_ringing_channel"
+            val channel = NotificationChannel(
+                channelId,
+                "Alarm Ringing",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Alarm is ringing notification"
+                enableVibration(true)
+                enableLights(true)
+                setShowBadge(true)
+                setSound(null, null) // Disable notification sound
+            }
+            
+            val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+    
+    private fun buildAlarmNotification(): Notification {
+        val channelId = "alarm_ringing_channel"
+        
+        // Create delete intent for notification dismiss handling
+        val deleteIntent = Intent(this, NotificationRepostReceiver::class.java).apply {
+            action = Constants.ACTION_NOTIFICATION_DISMISSED
+            putExtra("ALARM_ID", alarmId)
+            putExtra("notification_source", "activity") // Mark as activity notification
+        }
+        val deletePendingIntent = PendingIntent.getBroadcast(
+            this, alarmId + 4000, deleteIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        
+        // Create content intent to open AlarmActivity
+        val contentIntent = Intent(this, AlarmActivity::class.java).apply {
+            putExtra(AlarmReceiver.ALARM_ID, alarmId)
+            putExtra("mission_type", intent.getStringExtra("mission_type"))
+            putExtra("mission_password", intent.getStringExtra("mission_password"))
+            putExtra("mission_id", intent.getStringExtra("mission_id"))
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val contentPendingIntent = PendingIntent.getActivity(
+            this, alarmId + 4001, contentIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        
+        val builder = NotificationCompat.Builder(this, channelId)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setColor(android.graphics.Color.parseColor("#1976D2"))
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(false)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setContentIntent(contentPendingIntent)
+            .setDeleteIntent(deletePendingIntent)
+        
+        if (isWakeCheckLaunchState.value) {
+            builder
+                .setContentTitle("Wake-up check active")
+                .setContentText("Confirm that you're awake in the app")
+                .setCategory(NotificationCompat.CATEGORY_SYSTEM)
+        } else {
+            builder
+                .setContentTitle("Alarm Active")
+                .setContentText("Your alarm is ringing - Tap to stop")
+                .setDefaults(NotificationCompat.DEFAULT_ALL) // Enable sound, vibration, lights
+        }
+        
+        return builder.build()
+    }
+    
     companion object {
         private const val TAG = "AlarmActivity"
         const val DEFAULT_GLOBAL_PASSWORD = "IfYouWantYouCanSleep"
         private const val PREFS_NAME = "alarm_volume_prefs"
         private const val KEY_PREV_VOLUME = "prev_alarm_volume"
         private const val MIN_PERCENT = 50
+        private const val ALARM_RINGING_NOTIFICATION_ID = 8901
 
         
         private fun writePersistentLog(message: String) {
@@ -820,6 +940,98 @@ class AlarmActivity : ComponentActivity() {
         val missionType = intent.getStringExtra("mission_type")
         val ringtoneUri = intent.getStringExtra(AlarmReceiver.EXTRA_RINGTONE_URI)
         
+        // ===================== DPS FORCE RESTART SEQUENCER RESTORATION =====================
+        // Detect force restart for sequencer alarms and restore exact mission sequence
+        try {
+            val alarmStorage = AlarmStorage(applicationContext)
+            val alarm = alarmStorage.getAlarm(alarmId)
+            
+            if (alarm != null && alarm.missionType == "sequencer") {
+                val mainActivity = MainActivity.getInstance()
+                var sequencer = mainActivity?.missionSequencer
+                
+                if (sequencer == null) {
+                    // App was killed, try to create sequencer with DPS context
+                    Log.d(TAG, "FORCE_RESTART: MainActivity null, creating MissionSequencer in DPS context for alarmId=$alarmId")
+                    val dpsContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        createDeviceProtectedStorageContext()
+                    } else {
+                        this@AlarmActivity
+                    }
+                    
+                    sequencer = MissionSequencer(dpsContext)
+                    
+                    // Wait a moment for async initialization to complete
+                    Thread.sleep(100)
+                }
+                
+                // If sequencer already has a current mission, do NOT rebuild – this is not a force restart
+                val existingMission = sequencer.getCurrentMission()
+                if (existingMission != null) {
+                    Log.d(TAG, "FORCE_RESTART_CHECK: Sequencer already has currentMission=${existingMission.id}, skipping restore")
+                } else {
+                    Log.d(TAG, "FORCE_RESTART_DETECTED: Restoring exact mission sequence from missionPassword for alarmId=$alarmId")
+                    
+                    // Parse missionPassword into ordered mission IDs
+                    val missionPasswordRaw = alarm.missionPassword.orEmpty().trim()
+                    if (missionPasswordRaw.isNotEmpty()) {
+                        val missionIds: List<String> = missionPasswordRaw
+                            .split("+")
+                            .map { it.trim().lowercase() }
+                            .mapNotNull { mission ->
+                                when (mission) {
+                                    "tap" -> "tap"
+                                    "pwd", "password", "pswd" -> "password"
+                                    "none", "" -> null
+                                    else -> {
+                                        Log.w(TAG, "FORCE_RESTART_RESTORE_WARN: Unknown mission token '$mission'")
+                                        null
+                                    }
+                                }
+                            }
+                        
+                        if (missionIds.isNotEmpty()) {
+                            // Build MissionSpec list preserving exact original order
+                            val specs = missionIds.map { missionId ->
+                                val timeoutMs = when (missionId) {
+                                    "tap" -> 105_000L
+                                    "password" -> 30_000L
+                                    else -> 30_000L
+                                }
+                                
+                                MissionSpec(
+                                    id = missionId,
+                                    timeoutMs = timeoutMs,
+                                    retryCount = 0,
+                                    retryDelayMs = 1_000L
+                                )
+                            }
+                            
+                            if (specs.isNotEmpty()) {
+                                // Clear any existing queue to avoid duplicates
+                                sequencer.getQueueStore().clearQueue()
+                                
+                                // Enqueue missions in the exact original order
+                                sequencer.enqueueAll(specs)
+                                
+                                // Start the sequencer with ringtone URI
+                                val ringtoneUri = alarm?.ringtoneUri
+                                sequencer.startWhenAlarmFires(ringtoneUri)
+                                
+                                // Give more time for the first mission to start and be saved to DPS
+                                Thread.sleep(500)
+                                
+                                Log.d(TAG, "FORCE_RESTART_SEQUENCE_RESTORED: ${specs.size} missions restored in original order=$missionIds for alarmId=$alarmId")
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error restoring mission sequence after force restart for alarmId=$alarmId", e)
+        }
+        // ===================================================================================
+        
         // ===================== NONE-MISSION FIX ======================
         if (isSequencerMission && missionType.isNullOrEmpty()) {
             MissionLogger.log("MISSION_GUARD: Ignored null missionType on activity create (prevent NONE).")
@@ -1162,6 +1374,18 @@ class AlarmActivity : ComponentActivity() {
         }
 
         turnScreenOn()
+        
+        // Show alarm ringing notification
+        showAlarmRingingNotification()
+        
+        // Register notification repost receiver
+        try {
+            val filter = IntentFilter("com.vaishnava.alarm.REPOST_ACTIVITY_NOTIFICATION")
+            registerReceiver(notificationRepostReceiver, filter)
+            Log.d(TAG, "Registered notification repost receiver")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register notification repost receiver: ${e.message}")
+        }
     }
 
     override fun onResume() {
@@ -1234,6 +1458,12 @@ class AlarmActivity : ComponentActivity() {
     
     private fun startAudioIfNeeded(uriString: String?) {
     MissionLogger.log("ACT_AUDIO: startAudioIfNeeded called with URI: $uriString")
+    
+    // Skip audio playback when handling a single-mission alarm; audio is already managed by AlarmForegroundService
+    if (!isSequencerMission) {
+        MissionLogger.log("ACT_AUDIO: Skipping audio playback for single-mission alarm (handled by service).")
+        return
+    }
     
     if (uriString.isNullOrBlank()) {
         MissionLogger.log("ACT_AUDIO: No ringtone URI, skipping start.")
@@ -2693,6 +2923,9 @@ class AlarmActivity : ComponentActivity() {
 
     private fun dismissAlarm(alarmId: Int) {
         try {
+            // Hide alarm ringing notification
+            hideAlarmRingingNotification()
+            
             // Check if this is a protected alarm
             val alarmStorage = AlarmStorage(applicationContext)
             val alarm = alarmStorage.getAlarms().find { it.id == alarmId }
@@ -2965,6 +3198,9 @@ class AlarmActivity : ComponentActivity() {
         }
         try { unregisterReceiver(finishAlarmReceiver) } catch (e: Exception) {
             // Error unregistering finish alarm receiver
+        }
+        try { unregisterReceiver(notificationRepostReceiver) } catch (e: Exception) {
+            // Error unregistering notification repost receiver
         }
         try {
             // DISABLED: ttsRunnable cleanup - legacy TTS repeater removed
