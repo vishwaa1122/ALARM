@@ -401,9 +401,9 @@ class AlarmReceiver : BroadcastReceiver() {
             Log.e(TAG, "Failed to start AlarmForegroundService: ${e.message}", e)
         }
         
-        // 1a) Start UI Activity immediately for ALL non-sequencer alarms so the ringing UI appears promptly
+        // 1a) Start UI Activity immediately ONLY for protected alarms (bypass background restrictions)
         // Sequencer alarms launch their own missions, so skip for those
-        if (!isWakeUpFollowUp && alarm.missionType != "sequencer") {
+        if (alarm.isProtected == true && !isWakeUpFollowUp && alarm.missionType != "sequencer") {
             try {
                 Log.i("LLM-DBG","UI_START_ATTEMPT target=AlarmActivity flags=NEW_TASK|CLEAR_TOP from=AlarmReceiver")
                 val act = Intent(context, AlarmActivity::class.java).apply {

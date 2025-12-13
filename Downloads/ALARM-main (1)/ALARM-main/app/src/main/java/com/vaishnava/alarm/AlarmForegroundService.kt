@@ -560,8 +560,12 @@ class AlarmForegroundService : Service() {
                 vibrator = null
             } catch (_: Exception) {}
 
-            // Clear notifications
+            // Clear notifications – ensure no lingering alarm/ringing notifications
             clearNextAlarmNotification()
+            try {
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancelAll() // cancel any remaining notifications including ringing one
+            } catch (_: Exception) {}
 
             // Clear current service alarm ID tracking
             try {
@@ -613,7 +617,7 @@ class AlarmForegroundService : Service() {
             // CRITICAL FIX: Only stop service if sequencer is actually complete
             val mainActivity = MainActivity.getInstance()
             val sequencer = mainActivity?.missionSequencer ?: getForceRestartSequencer()
-            if (sequencer != null && sequencer.isSequencerComplete) {
+            if (sequencer != null && sequencer.getSequencerCompleteStatus()) {
                 Log.d(TAG, "STOP_ALARM_SERVICE: Sequencer is complete, stopping service")
                 stopAlarm()
                 return START_NOT_STICKY
@@ -621,6 +625,25 @@ class AlarmForegroundService : Service() {
                 Log.d(TAG, "STOP_ALARM_SERVICE: Sequencer not complete, ignoring stop request")
                 return START_STICKY
             }
+        }
+        
+        // CRITICAL: Handle ACTION_STOP_SERVICE_AUDIO for mission transitions
+        if (action == "ACTION_STOP_SERVICE_AUDIO") {
+            Log.d(TAG, "ACTION_STOP_SERVICE_AUDIO received, stopping service audio")
+            try {
+                // Stop only the audio components without stopping the entire service
+                stopMediaPlayer()
+                tts?.let { tts ->
+                    try { tts.stop() } catch (_: Exception) {}
+                    try { tts.shutdown() } catch (_: Exception) {}
+                    this@AlarmForegroundService.tts = null
+                }
+                stopPeriodicTTS()
+                Log.d(TAG, "ACTION_STOP_SERVICE_AUDIO: Service audio stopped successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "ACTION_STOP_SERVICE_AUDIO: Failed to stop service audio - ${e.message}")
+            }
+            return START_STICKY
         }
         
         // Extract extras and update state
@@ -1233,6 +1256,8 @@ class AlarmForegroundService : Service() {
                     currentMissionType?.let { putExtra("mission_type", it) }
                     currentMissionPassword?.let { putExtra("mission_password", it) }
                     putExtra("is_protected", currentIsProtected)
+                    
+                    // MISSION GUARD: Removed guard flag causing dual audio and UI freeze
                 }
                 startActivity(immediateIntent)
                 android.util.Log.d("WakeCheckDebug", "AlarmForegroundService: started immediate activity for alarmId=$currentAlarmId isWakeCheckLaunch=$isWakeCheckLaunch")

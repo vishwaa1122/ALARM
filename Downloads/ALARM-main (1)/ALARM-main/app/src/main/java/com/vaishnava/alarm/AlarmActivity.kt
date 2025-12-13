@@ -140,6 +140,11 @@ class AlarmActivity : ComponentActivity() {
     }
     
     private fun showAlarmRingingNotification() {
+        // Skip notification for single-mission alarms (handled by foreground service)
+        if (!isSequencerMission) {
+            Log.d(TAG, "ALARM_RINGING_NOTIFICATION: Skipped for single-mission alarm handled by service")
+            return
+        }
         try {
             createAlarmNotificationChannel()
             val notification = buildAlarmNotification()
@@ -154,6 +159,8 @@ class AlarmActivity : ComponentActivity() {
     }
     
     private fun hideAlarmRingingNotification() {
+        // Skip for single-mission alarms; nothing to hide because we never showed it
+        if (!isSequencerMission) return
         try {
             val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.cancel(ALARM_RINGING_NOTIFICATION_ID)
@@ -901,6 +908,7 @@ class AlarmActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+                
         // ================= FINAL TERMINAL GUARD =================
         val incomingMissionType = intent.getStringExtra("mission_type")
         val incomingMissionId = intent.getStringExtra("mission_id")
@@ -909,15 +917,15 @@ class AlarmActivity : ComponentActivity() {
             false
         )
 
-        if (
+        // Original sequencer guard logic only - no guard for single alarms
+        // Single alarms handled naturally by UI logic (like working copy)
+        if (fromSequencer && (
             // Activity relaunched after sequencer completion
             isSequencerComplete ||
-
+            
             // OR relaunched with empty mission (lockscreen / OEM relaunch)
-            (!fromSequencer &&
-             incomingMissionType.isNullOrEmpty() &&
-             incomingMissionId.isNullOrEmpty())
-        ) {
+            (incomingMissionType.isNullOrEmpty() && incomingMissionId.isNullOrEmpty())
+        )) {
             MissionLogger.log(
                 "FINAL_FIX: Killing AlarmActivity permanently to prevent NONE / duplicate mission"
             )
@@ -928,8 +936,6 @@ class AlarmActivity : ComponentActivity() {
             return
         }
         // ========================================================
-        
-        // CRITICAL DEBUG: Log all intent extras when AlarmActivity starts
         MissionLogger.log("ACTIVITY_START: AlarmActivity onCreate called")
         intent.extras?.keySet()?.forEach { key ->
             MissionLogger.log("ACTIVITY_START: Intent extra - $key = ${intent.extras?.get(key)}")
@@ -1156,35 +1162,24 @@ class AlarmActivity : ComponentActivity() {
             Log.d(TAG, "CONFIG_LOAD_START: alarmId=$alarmId isSequencerMission=$isSequencerMission sequencerContext=$sequencerContext hasAlarm=${alarm != null}")
 
             // CRITICAL FIX: Use ONLY Intent extras - no storage access whatsoever
-            val intentMissionType = intent?.getStringExtra("mission_type")
+            val intentMissionType = intent?.getStringExtra("mission_type") ?: ""
             val intentMissionPassword = intent?.getStringExtra("mission_password") ?: ""
             
             Log.d(TAG, "INTENT_ONLY: alarmId=$alarmId missionType=$intentMissionType missionPassword=$intentMissionPassword")
             
-            // Only configure mission if we have a valid mission type
-            if (!intentMissionType.isNullOrEmpty()) {
-                // CRITICAL FIX: If MissionSequencer is active, don't trigger "none" mission logic
-                val missionSequencer = MissionSequencer(this)
-                if (missionSequencer.isMissionRunning() && intentMissionType == "none") {
-                    Log.w(TAG, "SEQUENCER_ACTIVE: Skipping 'none' mission logic while sequencer is running")
-                    return
-                }
-                
-                // Use ONLY Intent extras - never access storage
-                val persistedMissionType = intentMissionType
-                missionTapEnabled = (persistedMissionType == "tap")
-                requiredPassword = if (intentMissionPassword.isNotEmpty()) {
-                    intentMissionPassword
-                } else if (persistedMissionType == "password") {
-                    DEFAULT_GLOBAL_PASSWORD
-                } else {
-                    null
-                }
-                
-                Log.d(TAG, "MISSION_CONFIG: alarmId=$alarmId isSequencer=$isSequencerMission missionType=$persistedMissionType tapEnabled=$missionTapEnabled hasPassword=${requiredPassword != null} requiredPassword=$requiredPassword alarmMissionType=${alarm?.missionType} alarmMissionPassword=${alarm?.missionPassword}")
+            // ================= EXACT COPY FROM WORKING NESTED COPY =================
+            // Use ONLY Intent extras - never access storage (exact copy from working copy)
+            val persistedMissionType = intentMissionType
+            missionTapEnabled = (persistedMissionType == "tap")
+            requiredPassword = if (intentMissionPassword.isNotEmpty()) {
+                intentMissionPassword
+            } else if (persistedMissionType == "password") {
+                DEFAULT_GLOBAL_PASSWORD
             } else {
-                Log.w(TAG, "No valid mission type found in intent, skipping mission configuration")
+                null
             }
+
+            Log.d(TAG, "MISSION_CONFIG: alarmId=$alarmId isSequencer=$isSequencerMission missionType=$persistedMissionType tapEnabled=$missionTapEnabled hasPassword=${requiredPassword != null} requiredPassword=$requiredPassword alarmMissionType=${alarm?.missionType} alarmMissionPassword=${alarm?.missionPassword}")
 
             // Set currentMissionId for sequencer missions to prevent fallback issues
             if (isSequencerMission) {
@@ -2496,6 +2491,7 @@ class AlarmActivity : ComponentActivity() {
                     val isValidMissionType = missionType == "tap" || missionType == "password"
                     isValidMissionType
                 } else {
+                    // CRITICAL FIX: Use exact same logic as working copy for ALL alarms
                     (missionTapEnabled || requiredPassword != null)
                 }
                 if (!isWakeCheck && hasMission) {
