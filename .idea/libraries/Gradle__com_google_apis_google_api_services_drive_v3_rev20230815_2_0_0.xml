@@ -1,0 +1,14 @@
+<component name="libraryTable">
+  <library name="Gradle: com.google.apis:google-api-services-drive:v3-rev20230815-2.0.0" type="java-imported" external-system-id="GRADLE">
+    <properties groupId="com.google.apis" artifactId="google-api-services-drive" version="v3-rev20230815-2.0.0" baseVersion="v3-rev20230815-2.0.0" />
+    <CLASSES>
+      <root url="jar://$USER_HOME$/.gradle/caches/modules-2/files-2.1/com.google.apis/google-api-services-drive/v3-rev20230815-2.0.0/827dc78661496ae7538dda3e67a4b18de4bd632d/google-api-services-drive-v3-rev20230815-2.0.0.jar!/" />
+    </CLASSES>
+    <JAVADOC>
+      <root url="jar://$USER_HOME$/.gradle/caches/modules-2/files-2.1/com.google.apis/google-api-services-drive/v3-rev20230815-2.0.0/b734b906badedfeacf355d8df55c66203560b6b3/google-api-services-drive-v3-rev20230815-2.0.0-javadoc.jar!/" />
+    </JAVADOC>
+    <SOURCES>
+      <root url="jar://$USER_HOME$/.gradle/caches/modules-2/files-2.1/com.google.apis/google-api-services-drive/v3-rev20230815-2.0.0/98be7792c12eb6cd851c9c13283baa42e1a4ffb9/google-api-services-drive-v3-rev20230815-2.0.0-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>

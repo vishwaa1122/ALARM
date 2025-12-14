@@ -388,6 +388,9 @@ class AlarmReceiver : BroadcastReceiver() {
                         putExtra(ALARM_ID, alarm.id)
                         putExtra(EXTRA_RINGTONE_URI, alarm.ringtoneUri)
                         putExtra(EXTRA_REPEAT_DAYS, alarm.days?.toIntArray())
+                        // CRITICAL FIX: Pass mission data explicitly to ensure intent contains mission type
+                        putExtra("mission_type", alarm.missionType)
+                        putExtra("mission_password", alarm.missionPassword)
                         if (isWakeUpFollowUp) {
                             putExtra("is_wake_up_follow_up", true)
                         }
@@ -401,8 +404,8 @@ class AlarmReceiver : BroadcastReceiver() {
             Log.e(TAG, "Failed to start AlarmForegroundService: ${e.message}", e)
         }
         
-        // 1a) Start UI Activity immediately for protected alarms to bypass background restrictions
-        // BUT NOT for sequencer alarms - let the sequencer handle launching individual missions
+        // 1a) Start UI Activity immediately ONLY for protected alarms (bypass background restrictions)
+        // Sequencer alarms launch their own missions, so skip for those
         if (alarm.isProtected == true && !isWakeUpFollowUp && alarm.missionType != "sequencer") {
             try {
                 Log.i("LLM-DBG","UI_START_ATTEMPT target=AlarmActivity flags=NEW_TASK|CLEAR_TOP from=AlarmReceiver")

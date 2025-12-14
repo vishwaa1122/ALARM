@@ -293,10 +293,9 @@ class AlarmForegroundService : Service() {
                                     when (mission) {
                                         "tap" -> "tap"
                                         "pwd", "password", "pswd" -> "password"
-                                        else -> null // CRITICAL FIX: Return null for invalid mission names
+                                        else -> "" // CRITICAL FIX: Block invalid mission names
                                     }
                                 }
-                                .filterNotNull()
                                 .filter { it.isNotEmpty() }
                             
                             android.util.Log.d("MISSION_DEBUG_LAUNCH", "Parsed missionIds: $missionIds")
@@ -560,8 +559,12 @@ class AlarmForegroundService : Service() {
                 vibrator = null
             } catch (_: Exception) {}
 
-            // Clear notifications
+            // Clear notifications – ensure no lingering alarm/ringing notifications
             clearNextAlarmNotification()
+            try {
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.cancelAll() // cancel any remaining notifications including ringing one
+            } catch (_: Exception) {}
 
             // Clear current service alarm ID tracking
             try {
@@ -613,7 +616,7 @@ class AlarmForegroundService : Service() {
             // CRITICAL FIX: Only stop service if sequencer is actually complete
             val mainActivity = MainActivity.getInstance()
             val sequencer = mainActivity?.missionSequencer ?: getForceRestartSequencer()
-            if (sequencer != null && sequencer.isSequencerComplete) {
+            if (sequencer != null && sequencer.getSequencerCompleteStatus()) {
                 Log.d(TAG, "STOP_ALARM_SERVICE: Sequencer is complete, stopping service")
                 stopAlarm()
                 return START_NOT_STICKY
@@ -621,6 +624,25 @@ class AlarmForegroundService : Service() {
                 Log.d(TAG, "STOP_ALARM_SERVICE: Sequencer not complete, ignoring stop request")
                 return START_STICKY
             }
+        }
+        
+        // CRITICAL: Handle ACTION_STOP_SERVICE_AUDIO for mission transitions
+        if (action == "ACTION_STOP_SERVICE_AUDIO") {
+            Log.d(TAG, "ACTION_STOP_SERVICE_AUDIO received, stopping service audio")
+            try {
+                // Stop only the audio components without stopping the entire service
+                stopMediaPlayer()
+                tts?.let { tts ->
+                    try { tts.stop() } catch (_: Exception) {}
+                    try { tts.shutdown() } catch (_: Exception) {}
+                    this@AlarmForegroundService.tts = null
+                }
+                stopPeriodicTTS()
+                Log.d(TAG, "ACTION_STOP_SERVICE_AUDIO: Service audio stopped successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "ACTION_STOP_SERVICE_AUDIO: Failed to stop service audio - ${e.message}")
+            }
+            return START_STICKY
         }
         
         // Extract extras and update state
@@ -747,10 +769,19 @@ class AlarmForegroundService : Service() {
             storedIsProtected = alarm?.isProtected ?: false
         } catch (_: Exception) { }
         
-        // CRITICAL FIX: Parse mission data from alarm configuration for both single and multi-mission
+        // CRITICAL FIX: Use intent mission data first, then fallback to alarm storage
+        val finalMissionType = missionType ?: try { alarmStorage.getAlarm(currentAlarmId)?.missionType } catch (_: Exception) { null }
+        val finalMissionPassword = missionPassword ?: try { alarmStorage.getAlarm(currentAlarmId)?.missionPassword } catch (_: Exception) { null }
+        val finalIsProtected = if (isProtected) isProtected else try { alarmStorage.getAlarm(currentAlarmId)?.isProtected ?: false } catch (_: Exception) { false }
+        
+        // Store mission data for later use when launching AlarmActivity
+        currentMissionType = finalMissionType
+        currentMissionPassword = finalMissionPassword
+        currentIsProtected = finalIsProtected
+        
         val alarm = alarmStorage.getAlarm(currentAlarmId)
-        if (alarm != null) {
-            when (alarm.missionType) {
+        if (alarm != null && finalMissionType == "sequencer") {
+            when (finalMissionType) {
                 "sequencer" -> {
                     // For sequencer alarms, parse the mission sequence
                     val missionNames = alarm.missionPassword ?: ""
@@ -1233,6 +1264,8 @@ class AlarmForegroundService : Service() {
                     currentMissionType?.let { putExtra("mission_type", it) }
                     currentMissionPassword?.let { putExtra("mission_password", it) }
                     putExtra("is_protected", currentIsProtected)
+                    
+                    // MISSION GUARD: Removed guard flag causing dual audio and UI freeze
                 }
                 startActivity(immediateIntent)
                 android.util.Log.d("WakeCheckDebug", "AlarmForegroundService: started immediate activity for alarmId=$currentAlarmId isWakeCheckLaunch=$isWakeCheckLaunch")
@@ -2022,6 +2055,7 @@ private fun shutdownTTSForensic() {
             .setAutoCancel(false)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setFullScreenIntent(fullScreen, true)
+            .setContentIntent(fullScreen) // CRITICAL FIX: Use same intent for both lockscreen and notification tap
             .setDeleteIntent(deletePendingIntent) // Handle notification dismiss
 
         if (inWakeCheckGate) {
@@ -2061,28 +2095,22 @@ private fun shutdownTTSForensic() {
                                 when (mission) {
                                     "tap" -> "tap"
                                     "pwd", "password", "pswd" -> "password"
-                                    else -> null // CRITICAL FIX: Return null for invalid mission names
+                                    else -> "" // CRITICAL FIX: Block invalid mission names
                                 }
                             }
-                            .filterNotNull()
                             .filter { it.isNotEmpty() }
                         
                         android.util.Log.d("MISSION_DEBUG", "Parsed missionIds: $missionIds")
                         
                         // CRITICAL FIX: Block "none" missions - let sequencer handle empty cases
-                        if (missionIds.isEmpty()) {
-                            android.util.Log.w("MISSION_DEBUG", "No valid missions found, using empty mission type")
-                            localMissionType = ""
-                        } else {
-                            localMissionType = missionIds.firstOrNull() ?: ""
-                        }
+                        localMissionType = missionIds.firstOrNull() ?: ""
                         localMissionPassword = if (localMissionType == "password") MissionSequencer.DEFAULT_GLOBAL_PASSWORD else ""
                         
                         android.util.Log.d("MISSION_DEBUG", "Final localMissionType: '$localMissionType'")
                     }
                     "tap" -> {
                         localMissionType = "tap"
-                        localMissionPassword = ""
+                        localMissionPassword = alarm.missionPassword?.takeIf { it.isNotBlank() } ?: "tap_mission"
                     }
                     "password" -> {
                         localMissionType = "password"
@@ -2110,7 +2138,7 @@ private fun shutdownTTSForensic() {
             if (isWakeCheckLaunch) putExtra("from_wake_check", true)
             
             // Pass mission data for Direct Boot restoration
-            localMissionType?.let { putExtra("mission_type", it) }
+            putExtra("mission_type", localMissionType ?: "")
             localMissionPassword?.let { putExtra("mission_password", it) }
             putExtra("is_protected", localIsProtected)
             

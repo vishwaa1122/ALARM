@@ -9,6 +9,7 @@
 )
 
 package com.vaishnava.alarm
+
 import com.vaishnava.alarm.CloudBackupControls
 import com.vaishnava.alarm.data.resolveRingtoneTitle
 import android.Manifest
@@ -450,11 +451,15 @@ class MainActivity : BaseActivity() {
                                 missionType
                             }
 
-                            // CRITICAL FIX: For password missions, use default password if none provided
+                            // CRITICAL FIX: For password and tap missions, use default password if none provided
                             val finalMissionPassword = when {
                                 actualMissionType == "password" && missionPassword.isNullOrEmpty() -> {
                                     Log.d("MainActivity", "Using default password for password mission")
                                     "IfYouWantYouCanSleep"
+                                }
+                                actualMissionType == "tap" && missionPassword.isNullOrEmpty() -> {
+                                    Log.d("MainActivity", "Using default password for tap mission")
+                                    "tap_mission"
                                 }
                                 else -> missionPassword
                             }
