@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Minimal, non-destructive admin: no special policies requested.
+         This allows activation on stricter OEMs like Samsung without
+         requiring full device-owner privileges. -->
+    <uses-policies>
+        <!-- If you later need to lock the screen via DevicePolicyManager.lockNow(),
+             you can add:
+             <force-lock />
+        -->
+    </uses-policies>
+</device-admin>

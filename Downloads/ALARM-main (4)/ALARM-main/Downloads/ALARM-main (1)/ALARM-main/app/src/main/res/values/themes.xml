@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Light theme (existing) -->
+    <style name="Theme.Chrona" parent="Theme.Material3.Light.NoActionBar">
+        <!-- Core palette -->
+        <item name="colorPrimary">@color/md_theme_light_primary</item>
+        <item name="colorOnPrimary">@color/md_theme_light_onPrimary</item>
+        <item name="colorSecondary">@color/md_theme_light_secondary</item>
+        <item name="colorOnSecondary">@color/md_theme_light_onSecondary</item>
+        <item name="colorSurface">@color/md_theme_light_surface</item>
+        <item name="colorOnSurface">@color/md_theme_light_onSurface</item>
+
+        <!-- System bars -->
+        <item name="android:statusBarColor">?attr/colorPrimary</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">true</item>
+        <item name="android:navigationBarColor">?attr/colorSurface</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
+
+        <!-- App bar / toolbar -->
+        <item name="appBarLayoutStyle">@style/Widget.Chrona.AppBarLayout</item>
+        <item name="toolbarStyle">@style/Widget.Chrona.Toolbar</item>
+    </style>
+
+    <style name="Widget.Chrona.AppBarLayout" parent="Widget.Material3.AppBarLayout">
+        <item name="android:background">?attr/colorPrimary</item>
+    </style>
+
+    <style name="Widget.Chrona.Toolbar" parent="Widget.Material3.Toolbar">
+        <item name="materialThemeOverlay">@style/ThemeOverlay.Chrona.Toolbar</item>
+        <item name="titleTextColor">?attr/colorOnPrimary</item>
+        <item name="navigationIconTint">?attr/colorOnPrimary</item>
+    </style>
+
+    <style name="ThemeOverlay.Chrona.Toolbar" parent="">
+        <item name="colorControlNormal">?attr/colorOnPrimary</item>
+    </style>
+
+    <!-- ====================================================== -->
+    <!-- Alias / specialized theme used by manifest: Theme.Alarm
+         It reuses the existing Theme.Chrona so you don't need to duplicate palettes.
+         If you later want a distinct alarm theme, replace parent with Theme.Material3.DayNight.NoActionBar
+         and add custom items here. -->
+    <!-- ====================================================== -->
+    <style name="Theme.Alarm" parent="Theme.Chrona">
+        <!-- Inherit everything from Theme.Chrona; override only if needed -->
+        <!-- Example overrides (commented) -->
+        <!-- <item name="colorPrimary">@color/your_alarm_primary</item> -->
+        <!-- <item name="android:statusBarColor">?attr/colorPrimary</item> -->
+    </style>
+
+</resources>
