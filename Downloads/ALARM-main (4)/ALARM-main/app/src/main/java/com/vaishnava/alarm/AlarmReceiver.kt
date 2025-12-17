@@ -382,6 +382,29 @@ class AlarmReceiver : BroadcastReceiver() {
                 // MissionSequencer handles everything for sequencer alarms (audio + missions)
                 // AlarmForegroundService only handles single-mission alarms
                 if (alarm.missionType != "sequencer") {
+                    // Check if this alarm was recently dismissed to prevent restart loops
+                    try {
+                        val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                            context.createDeviceProtectedStorageContext()
+                        } else {
+                            context
+                        }
+                        val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                        val dismissTs = prefs.getLong("dismiss_ts_${alarm.id}", 0L)
+                        val wasDismissed = prefs.getBoolean("alarm_dismissed_${alarm.id}", false)
+                        
+                        if (wasDismissed && dismissTs > 0L) {
+                            val now = System.currentTimeMillis()
+                            if (now - dismissTs < 120_000L) { // Within 2 minutes of dismissal
+                                Log.d(TAG, "Alarm ${alarm.id} was recently dismissed, preventing AlarmForegroundService start")
+                                prefs.edit().remove("alarm_dismissed_${alarm.id}").apply() // Clear flag
+                                return
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error checking dismiss state in AlarmReceiver: ${e.message}")
+                    }
+                    
                     Log.d(TAG, "Starting AlarmForegroundService for single-mission alarm ${alarm.id} (missionType: ${alarm.missionType})")
                     val svc = Intent(context, AlarmForegroundService::class.java).apply {
                         putExtra(ALARM_ID, alarm.id)

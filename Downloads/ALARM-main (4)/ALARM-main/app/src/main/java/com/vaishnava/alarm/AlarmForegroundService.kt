@@ -543,9 +543,34 @@
             
             // CRITICAL DEBUG: Log every time AlarmForegroundService is started
             android.util.Log.d("SERVICE_DEBUG_MAIN", "AlarmForegroundService.onStartCommand() called with intent=${intent?.action}")
-    
+
             val action = intent?.action
             val alarmId = intent?.getIntExtra(AlarmReceiver.ALARM_ID, -1) ?: -1
+            
+            // Check if this alarm was recently dismissed to prevent restart loops
+            if (alarmId != -1) {
+                try {
+                    val dps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        createDeviceProtectedStorageContext() ?: this
+                    } else {
+                        this
+                    }
+                    val prefs = dps.getSharedPreferences("alarm_dps", Context.MODE_PRIVATE)
+                    val dismissTs = prefs.getLong("dismiss_ts_$alarmId", 0L)
+                    val wasDismissed = prefs.getBoolean("alarm_dismissed_$alarmId", false)
+                    
+                    if (wasDismissed && dismissTs > 0L) {
+                        val now = System.currentTimeMillis()
+                        if (now - dismissTs < 60_000L) { // Within 1 minute of dismissal
+                            android.util.Log.d(TAG, "Alarm $alarmId was recently dismissed, preventing restart")
+                            prefs.edit().remove("alarm_dismissed_$alarmId").apply() // Clear flag
+                            return START_NOT_STICKY
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e(TAG, "Error checking dismiss state: ${e.message}")
+                }
+            }
             
             // CRITICAL: Handle STOP_ALARM_SERVICE action for sequencer completion
             if (action == "com.vaishnava.alarm.STOP_ALARM_SERVICE") {
@@ -608,8 +633,9 @@
     
             // Handle stop action
             if (action == Constants.ACTION_STOP_FOREGROUND_SERVICE) {
+                Log.d(TAG, "ACTION_STOP_FOREGROUND_SERVICE received for alarmId=$alarmId - stopping service completely")
                 stopAlarm()
-                return START_NOT_STICKY
+                return START_NOT_STICKY // Prevent service restart
             }
     
             // New start (normal alarm or wake-check follow-up): decide if we should
@@ -1933,7 +1959,6 @@
                 .setAutoCancel(false)
                 .setCategory(NotificationCompat.CATEGORY_ALARM)
                 .setFullScreenIntent(fullScreen, true)
-                .setDeleteIntent(deletePendingIntent) // Handle notification dismiss
     
             if (inWakeCheckGate) {
                 builder

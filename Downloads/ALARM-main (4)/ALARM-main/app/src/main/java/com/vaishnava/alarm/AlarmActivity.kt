@@ -1872,15 +1872,14 @@ class AlarmActivity : ComponentActivity() {
                 }
             }
 
-            // Dismiss button logic: Never show dismiss button - user must complete the mission
-            val dismissButtonVisible = when {
-                // Never show dismiss button during wake-up check
-                isWakeCheckLaunchState.value -> false
-                // Never show dismiss button in sequencer mode
-                isSequencerMission || isSequencerComplete -> false
-                // Never show dismiss button - user must complete mission
-                else -> false
-            }
+            // Dismiss button logic: Show dismiss button for none missions only
+            val missionType = intent?.getStringExtra("mission_type") ?: ""
+            val isNoneMission = missionType == "" || missionType == "none" || missionType == null
+            
+            // For none missions, always show dismiss button regardless of other conditions
+            val dismissButtonVisible = isNoneMission
+            
+            Log.d(TAG, "DISMISS_BUTTON_DEBUG: missionType='$missionType' isNoneMission=$isNoneMission isWakeCheck=${isWakeCheckLaunchState.value} isSequencer=$isSequencerMission dismissButtonVisible=$dismissButtonVisible")
 
             AnimatedVisibility(
                 visible = dismissButtonVisible,
@@ -1889,9 +1888,19 @@ class AlarmActivity : ComponentActivity() {
             ) {
                 Button(
                     onClick = {
+                        Log.d(TAG, "DISMISS_BUTTON_CLICKED: Dismiss button pressed for alarmId=$alarmId")
                         isDismissed = true
-                        // For all normal alarms, just dismiss directly without mission completion logic
+                        
+                        // Use the existing dismissAlarm function which handles everything properly
                         dismissAlarm(alarmId)
+                        
+                        // Finish activity immediately
+                        try {
+                            this@AlarmActivity.finish()
+                            Log.d(TAG, "DISMISS_BUTTON_CLICKED: Activity finished")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "DISMISS_BUTTON_CLICKED: Failed to finish activity", e)
+                        }
                     },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -2104,10 +2113,10 @@ class AlarmActivity : ComponentActivity() {
             val alarmStorage = AlarmStorage(applicationContext)
             val alarm = alarmStorage.getAlarms().find { it.id == alarmId }
 
-            // Only block dismissal for protected alarms with missions (password/tap)
+            // Only block dismissal for protected alarms with actual missions (password/tap)
             // Convert "none" to empty string for comparison
             val missionType = alarm?.missionType?.let { if (it == "none") "" else it } ?: ""
-            if (alarm?.isProtected == true && missionType.isNotEmpty()) {
+            if (alarm?.isProtected == true && (missionType == "tap" || missionType == "password")) {
                 Log.w(TAG, "Attempted to dismiss protected alarm $alarmId with mission $missionType - blocking dismissal")
                 // Show a message that this alarm cannot be dismissed
                 try {
